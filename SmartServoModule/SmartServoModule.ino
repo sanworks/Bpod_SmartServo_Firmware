@@ -56,8 +56,8 @@ Dynamixel2Arduino dxl2(Serial4, DXL_DIR_PIN2);
 Dynamixel2Arduino dxl3(Serial5, DXL_DIR_PIN3);
 
 // Program variables
-uint8_t motorInitialized[3][64] = {0}; // 1 = Initialized, 0 = Not
-uint8_t motorMode[3][64] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity
+uint8_t motorInitialized[3][8] = {0}; // 1 = Initialized, 0 = Not
+uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity
 uint8_t motorID = 1; // Motor ID
 uint8_t channel = 1; // Hardware serial channel targeted
 uint8_t newMode = 1; // Motor mode
