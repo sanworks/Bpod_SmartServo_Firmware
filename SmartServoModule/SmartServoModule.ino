@@ -55,12 +55,16 @@ Dynamixel2Arduino dxl1(Serial3, DXL_DIR_PIN1);
 Dynamixel2Arduino dxl2(Serial4, DXL_DIR_PIN2);
 Dynamixel2Arduino dxl3(Serial5, DXL_DIR_PIN3);
 
+// Constants
+const uint32_t validBaudRates[7] = {4000000, 57600, 1000000, 2000000, 3000000, 9600, 115200}; // Ordered by most likely encounters during auto-detection
+
 // Program variables
-uint8_t motorInitialized[3][8] = {0}; // 1 = Initialized, 0 = Not
 uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity
-uint8_t motorID = 1; // Motor ID
+uint8_t address = 1; // Motor ID
 uint8_t channel = 1; // Hardware serial channel targeted
 uint8_t newMode = 1; // Motor mode
+uint8_t newID = 0; // New motor ID
+uint8_t tableIndex = 0; // Control table index
 uint8_t opCode = 0; // Op code, a byte code to identify each operation
 uint8_t opSource = 0; // Op source, 0 = USB, 1 = State Machine
 float value = 0;
@@ -79,11 +83,6 @@ void setup() {
   dxl2.setPortProtocolVersion(2.0);
   dxl3.begin(4000000);
   dxl3.setPortProtocolVersion(2.0);
-
-  // Initialize motor 1 on each channel
-  startup_motor(1, 1);
-  startup_motor(2, 1);
-  startup_motor(3, 1);
 
   // Setup state machine UART serial port
   Serial1.begin(1312500);
@@ -106,19 +105,22 @@ void loop() {
           returnModuleInfo();
         }
       break;
+      case 'D': // Discover motors, initialize and return metadata
+        discoverMotors(true); // Arg: true returns metadata via USB, false does not
+      break;
       case '[': // Set max velocity
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         switch(channel) {
             case 1:
-              dxl1.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
+              dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
             break;
             case 2:
-              dxl2.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
+              dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
             break;
             case 3:
-              dxl3.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
+              dxl3.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
             break;
           }
           if (opSource == 0) {
@@ -128,17 +130,17 @@ void loop() {
 
       case ']': // Set max acceleration
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
         switch(channel) {
             case 1:
-              dxl1.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
+              dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
             break;
             case 2:
-              dxl2.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
+              dxl2.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
             break;
             case 3:
-              dxl3.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
+              dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
             break;
           }
           if (opSource == 0) {
@@ -148,18 +150,18 @@ void loop() {
 
       case 'P': // Set position goal
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
-        if ((motorMode[channel][motorID] == 1) || (motorMode[channel][motorID] == 2)) {
+        if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
           switch(channel) {
             case 1:
-              dxl1.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 2:
-              dxl2.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 3:
-              dxl3.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
           }
           if (opSource == 0) {
@@ -174,33 +176,33 @@ void loop() {
 
       case 'G': // Set position goal with a new velocity and acceleration
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
-        if (motorMode[channel][motorID] == 1) {
+        if (motorMode[channel][address] == 1) {
           switch(channel) {
             case 1:
-              dxl1.torqueOff(motorID);
-              dxl1.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
-              dxl1.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
-              dxl1.torqueOn(motorID);
-              dxl1.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl1.torqueOff(address);
+              dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
+              dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
+              dxl1.torqueOn(address);
+              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
               
             break;
             case 2:
-              dxl2.torqueOff(motorID);
-              dxl2.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
-              dxl2.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
-              dxl2.torqueOn(motorID);
-              dxl2.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl2.torqueOff(address);
+              dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
+              dxl2.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
+              dxl2.torqueOn(address);
+              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 3:
-              dxl3.torqueOff(motorID);
-              dxl3.writeControlTableItem(PROFILE_VELOCITY, motorID, maxVelocity);
-              dxl3.writeControlTableItem(PROFILE_ACCELERATION, motorID, maxAccel);
-              dxl3.torqueOn(motorID);
-              dxl3.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl3.torqueOff(address);
+              dxl3.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
+              dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
+              dxl3.torqueOn(address);
+              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
           }
           if (opSource == 0) {
@@ -216,22 +218,22 @@ void loop() {
 
       case 'C': // Set current-limited position goal
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         current = readFloatFromSource(opSource);
-        if (motorMode[channel][motorID] == 3) {
+        if (motorMode[channel][address] == 3) {
           switch(channel) {
             case 1:
-              dxl1.setGoalCurrent(motorID, current, UNIT_PERCENT);
-              dxl1.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl1.setGoalCurrent(address, current, UNIT_PERCENT);
+              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 2:
-              dxl2.setGoalCurrent(motorID, current, UNIT_PERCENT);
-              dxl2.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl2.setGoalCurrent(address, current, UNIT_PERCENT);
+              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 3:
-              dxl3.setGoalCurrent(motorID, current, UNIT_PERCENT);
-              dxl3.setGoalPosition(motorID, pos, UNIT_DEGREE);
+              dxl3.setGoalCurrent(address, current, UNIT_PERCENT);
+              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
           }
           if (opSource == 0) {
@@ -246,18 +248,18 @@ void loop() {
 
       case 'V': // Set velocity goal (in motor mode 4). Sign indicates direction.
         channel = readByteFromSource(opSource);
-        motorID = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
         newVelocity = readFloatFromSource(opSource);
-        if (motorMode[channel][motorID] == 4) {
+        if (motorMode[channel][address] == 4) {
           switch(channel) {
             case 1:
-              dxl1.setGoalVelocity(motorID, newVelocity, UNIT_RPM);
+              dxl1.setGoalVelocity(address, newVelocity, UNIT_RPM);
             break;
             case 2:
-              dxl2.setGoalVelocity(motorID, newVelocity, UNIT_RPM);
+              dxl2.setGoalVelocity(address, newVelocity, UNIT_RPM);
             break;
             case 3:
-              dxl3.setGoalVelocity(motorID, newVelocity, UNIT_RPM);
+              dxl3.setGoalVelocity(address, newVelocity, UNIT_RPM);
             break;
           }
           if (opSource == 0) {
@@ -273,57 +275,72 @@ void loop() {
       case 'R': // Return current position via USB
         if (opSource == 0) {
           channel = USBCOM.readByte();
-          motorID = USBCOM.readByte();
+          address = USBCOM.readByte();
             switch(channel) {
               case 1:
-                pos = dxl1.getPresentPosition(motorID, UNIT_DEGREE);
+                pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
               break;
               case 2:
-                pos = dxl2.getPresentPosition(motorID, UNIT_DEGREE);
+                pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
               break;
               case 3:
-                pos = dxl3.getPresentPosition(motorID, UNIT_DEGREE);
+                pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
               break;
             }
             USBCOM.writeFloat(pos);
         }
       break;
 
+      case 'T': // Return value from control table via USB
+        if (opSource == 0) {
+          channel = USBCOM.readByte();
+          address = USBCOM.readByte();
+          tableIndex = USBCOM.readByte();
+          switch(channel) {
+            case 1:
+              USBCOM.writeFloat(dxl1.readControlTableItem(tableIndex, address));
+            break;
+            case 2:
+              USBCOM.writeFloat(dxl2.readControlTableItem(tableIndex, address));
+            break;
+            case 3:
+              USBCOM.writeFloat(dxl3.readControlTableItem(tableIndex, address));
+            break;
+          }
+        }
+      break;
+
       case 'M': // Set motor mode
         if (opSource == 0) {
           channel = USBCOM.readByte();
-          motorID = USBCOM.readByte();
+          address = USBCOM.readByte();
           newMode = USBCOM.readByte();
-          setMotorMode(channel, motorID, newMode);
+          setMotorMode(channel, address, newMode);
+          USBCOM.writeByte(1);
+        }
+      break;
+
+      case 'I': // Set motor ID (address on channel)
+        if (opSource == 0) {
+          channel = USBCOM.readByte();
+          address = USBCOM.readByte();
+          newID = USBCOM.readByte();
+          switch(channel) {
+            case 1:
+              dxl1.setID(address, newID);
+            break;
+            case 2:
+              dxl2.setID(address, newID);
+            break;
+            case 3:
+              dxl3.setID(address, newID);
+            break;
+          }
           USBCOM.writeByte(1);
         }
       break;
     }
   }
-}
-
-void startup_motor(uint8_t channel, uint8_t motorIndex) {
-  // Connect to motor and initialize in position mode
-  switch(channel) {
-    case 1:
-        // Todo: Add code to find baud rate if motor does not reply
-        if (dxl1.ping(motorIndex)) {
-          dxl1.setBaudrate(1, 4000000);
-        }
-    break;
-    case 2:
-        if (dxl2.ping(motorIndex)) {
-          dxl2.setBaudrate(1, 4000000);
-        }
-    break;
-    case 3:
-        if (dxl3.ping(motorIndex)) {
-          dxl3.setBaudrate(1, 4000000);
-        }
-    break;
-  }
-  setMotorMode(channel, motorIndex, 1);
-  motorInitialized[channel][motorIndex] = 1;
 }
 
 void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
@@ -361,6 +378,77 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
     break;
   }
   motorMode[channel][motorIndex] = modeIndex;
+}
+
+void discoverMotors(bool useUSB) {
+  int i = 0;
+  bool found = false;
+  // Detect on channel 1
+  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+    found = false;
+    i = 0;
+    while ((found == false) && (i < 7)) {
+      dxl1.begin(validBaudRates[i]);
+      if (dxl1.ping(motorIndex)) {
+        found = true;
+        dxl1.torqueOff(motorIndex);
+        dxl1.setBaudrate(motorIndex, 4000000);
+        dxl1.begin(4000000);
+        dxl1.torqueOn(motorIndex);
+        if (useUSB) {
+          USBCOM.writeByte(1);
+          USBCOM.writeByte(motorIndex);
+          USBCOM.writeUint32(dxl1.getModelNumber(motorIndex));
+        }
+      }
+      i++;
+    }
+  }
+    // Detect on channel 2
+  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+    found = false;
+    i = 0;
+    while ((found == false) && (i < 7)) {
+      dxl2.begin(validBaudRates[i]);
+      if (dxl2.ping(motorIndex)) {
+        found = true;
+        dxl2.torqueOff(motorIndex);
+        dxl2.setBaudrate(motorIndex, 4000000);
+        dxl2.begin(4000000);
+        dxl2.torqueOn(motorIndex);
+        if (useUSB) {
+          USBCOM.writeByte(2);
+          USBCOM.writeByte(motorIndex);
+          USBCOM.writeUint32(dxl2.getModelNumber(motorIndex));
+        }
+      }
+      i++;
+    }
+  }
+    // Detect on channel 3
+  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+    found = false;
+    i = 0;
+    while ((found == false) && (i < 7)) {
+      dxl3.begin(validBaudRates[i]);
+      if (dxl3.ping(motorIndex)) {
+        found = true;
+        dxl3.torqueOff(motorIndex);
+        dxl3.setBaudrate(motorIndex, 4000000);
+        dxl3.begin(4000000);
+        dxl3.torqueOn(motorIndex);
+        if (useUSB) {
+          USBCOM.writeByte(3);
+          USBCOM.writeByte(motorIndex);
+          USBCOM.writeUint32(dxl3.getModelNumber(motorIndex));
+        }
+      }
+      i++;
+    }
+  }
+  dxl1.begin(4000000);
+  dxl2.begin(4000000);
+  dxl3.begin(4000000);
 }
 
 byte readByteFromSource(byte opSource) {
