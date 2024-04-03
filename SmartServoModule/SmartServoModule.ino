@@ -60,14 +60,16 @@ const uint32_t validBaudRates[7] = {4000000, 57600, 1000000, 2000000, 3000000, 9
 
 // Program variables
 uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity
-uint8_t address = 1; // Motor ID
-uint8_t channel = 1; // Hardware serial channel targeted
+uint8_t address = 1; // Motor address on a channel (1-253)
+uint8_t channel = 1; // Hardware serial channel targeted (1-3)
 uint8_t newMode = 1; // Motor mode
-uint8_t newID = 0; // New motor ID
+uint8_t newID = 0; // New motor address
 uint8_t tableIndex = 0; // Control table index
 uint8_t opCode = 0; // Op code, a byte code to identify each operation
 uint8_t opSource = 0; // Op source, 0 = USB, 1 = State Machine
-float value = 0;
+uint8_t focusChannel = 0; // The channel currently in focus
+uint8_t focusAddress = 0; // The motor address currently in focus
+float value = 0; // Temporary float
 float maxVelocity = 0; // Maximum velocity
 float maxAccel = 0; // Maximum acceleration
 float pos = 0; // Position (degrees)
@@ -128,6 +130,14 @@ void loop() {
           }
       break;
 
+      case 'F': // Set channel and address of motor in focus, for focused movement commands
+        focusChannel = readByteFromSource(opSource);
+        focusAddress = readByteFromSource(opSource);
+        if (opSource == 0) {
+          USBCOM.writeByte(1);
+        }
+      break;
+
       case ']': // Set max acceleration
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
@@ -148,29 +158,17 @@ void loop() {
           }
       break;
 
-      case 'P': // Set position goal
+      case 'P': // Set position goal of a target motor
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
-        if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
-          switch(channel) {
-            case 1:
-              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
-            break;
-            case 2:
-              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
-            break;
-            case 3:
-              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
-            break;
-          }
-          if (opSource == 0) {
-            USBCOM.writeByte(1);
-          }
-        } else {
-          if (opSource == 0) {
-            USBCOM.writeByte(0);
-          }
+        setGoalPosition(channel, address, pos);
+      break;
+
+      case 'p': // Set position of the motor in focus
+        pos = readFloatFromSource(opSource);
+        if (focusChannel > 0 && focusAddress  > 0) {
+          setGoalPosition(focusChannel, focusAddress, pos);
         }
       break;
 
@@ -320,7 +318,7 @@ void loop() {
         }
       break;
 
-      case 'I': // Set motor ID (address on channel)
+      case 'I': // Set motor ID (address on channel). Written to motor EEPROM for all future sessions.
         if (opSource == 0) {
           channel = USBCOM.readByte();
           address = USBCOM.readByte();
@@ -378,6 +376,29 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
     break;
   }
   motorMode[channel][motorIndex] = modeIndex;
+}
+
+void setGoalPosition(byte channel, byte address, float newPosition) {
+  if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
+    switch(channel) {
+      case 1:
+        dxl1.setGoalPosition(address, newPosition, UNIT_DEGREE);
+      break;
+      case 2:
+        dxl2.setGoalPosition(address, newPosition, UNIT_DEGREE);
+      break;
+      case 3:
+        dxl3.setGoalPosition(address, newPosition, UNIT_DEGREE);
+      break;
+    }
+    if (opSource == 0) {
+      USBCOM.writeByte(1);
+    }
+  } else {
+    if (opSource == 0) {
+      USBCOM.writeByte(0);
+    }
+  }
 }
 
 void discoverMotors(bool useUSB) {
