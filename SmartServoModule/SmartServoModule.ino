@@ -44,9 +44,10 @@
 #define MAX_STEPS 100
 #define MAX_PROGRAMS 256
 
-// Name of module for manual override UI and state machine assembler
+// Module properties
 char moduleName[] = "SmartServo"; 
-uint8_t circuitRevision = 0;
+const byte dioPins[3] = {9,8,7};
+const byte circuitRevisionArray[5] = {2,3,4,5,6};
 
 // Namespace (for Dynamixel control table items)
 using namespace ControlTableItem;  
@@ -94,6 +95,7 @@ uint8_t opCode = 0; // Op code, a byte code to identify each operation
 uint8_t opSource = 0; // Op source, 0 = USB, 1 = State Machine
 uint8_t focusChannel = 0; // The channel currently in focus
 uint8_t focusAddress = 0; // The motor address currently in focus
+uint8_t blocking = 0; // 0: confirm new position goal immediately 1: confirm after movement finishes executing
 uint32_t nSteps = 0; 
 float value = 0; // Temporary float
 float maxVelocity = 0; // Maximum velocity
@@ -101,6 +103,7 @@ float maxAccel = 0; // Maximum acceleration
 float pos = 0; // Position (degrees)
 float current = 0; // Current limit (percent)
 float newVelocity = 0; // Velocity (RPM)
+uint8_t circuitRevision = 0;
 
 
 void setup() {
@@ -115,6 +118,21 @@ void setup() {
   // Setup state machine UART serial port
   Serial1.begin(1312500);
   Serial1.addMemoryForRead(StateMachineSerialBuf, 192);
+
+  // Initialize DIO pins as input (high impedance)
+  for (int i = 0; i < 3; i++) {
+    pinMode(dioPins[i], INPUT);
+  }
+
+  // Read hardware revision from circuit board (an array of grounded pins indicates revision in binary, grounded = 1, floating = 0)
+  circuitRevision = 0;
+  for (int i = 0; i < 5; i++) {
+    pinMode(circuitRevisionArray[i], INPUT_PULLUP);
+    delay(1);
+    circuitRevision += pow(2, i)*digitalRead(circuitRevisionArray[i]);
+    pinMode(circuitRevisionArray[i], INPUT);
+  }
+  circuitRevision = 31-circuitRevision; 
 
   // Start hardware timer
   hardwareTimer.begin(programHandler, 100);
@@ -212,14 +230,14 @@ void loop() {
         }
       break;
 
-      case 'P': // Set position goal of a target motor
+      case 'P': // Set position goal of a target motor, at current velocity and acceleration
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         setGoalPosition(channel, address, pos);
       break;
 
-      case '>': // Set position of the motor in focus
+      case '>': // Set position of the motor currently in focus, at current velocity and acceleration
         pos = readFloatFromSource(opSource);
         if (focusChannel > 0 && focusAddress  > 0) {
           setGoalPosition(focusChannel, focusAddress, pos);
@@ -229,6 +247,7 @@ void loop() {
       case 'G': // Set position goal with a new velocity and acceleration
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
+        blocking = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
@@ -238,7 +257,6 @@ void loop() {
               dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
               dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
               dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
-              
             break;
             case 2:
               dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
@@ -250,6 +268,9 @@ void loop() {
               dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
               dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
+          }
+          if (blocking) {
+            delayUntilMovementEnd(channel, address, pos);
           }
           if (opSource == 0) {
             USBCOM.writeByte(1);
@@ -292,7 +313,7 @@ void loop() {
         }
       break;
 
-      case 'V': // Set velocity goal (in motor mode 4). Sign indicates direction.
+      case 'V': // Set velocity goal (in motor mode 4). Units = RPM. Sign indicates direction.
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         newVelocity = readFloatFromSource(opSource);
@@ -381,13 +402,13 @@ void loop() {
           tableIndex = USBCOM.readByte();
           switch(channel) {
             case 1:
-              USBCOM.writeFloat(dxl1.readControlTableItem(tableIndex, address));
+              USBCOM.writeInt32(dxl1.readControlTableItem(tableIndex, address));
             break;
             case 2:
-              USBCOM.writeFloat(dxl2.readControlTableItem(tableIndex, address));
+              USBCOM.writeInt32(dxl2.readControlTableItem(tableIndex, address));
             break;
             case 3:
-              USBCOM.writeFloat(dxl3.readControlTableItem(tableIndex, address));
+              USBCOM.writeInt32(dxl3.readControlTableItem(tableIndex, address));
             break;
           }
         }
@@ -511,7 +532,7 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
   motorMode[channel][motorIndex] = modeIndex;
 }
 
-void setGoalPosition(byte channel, byte address, float newPosition) {
+void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
   if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
     switch(channel) {
       case 1:
@@ -531,6 +552,30 @@ void setGoalPosition(byte channel, byte address, float newPosition) {
     if (opSource == 0) {
       USBCOM.writeByte(0);
     }
+  }
+}
+
+void delayUntilMovementEnd(uint8_t channel, uint8_t address, float targetPosition) {
+  float pos = 0;
+  switch (channel) {
+    case 1:
+      pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
+      while (abs(pos-targetPosition) > 1) {
+        pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
+      }
+    break;
+    case 2:
+      pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
+      while (abs(pos-targetPosition) > 1) {
+        pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
+      }
+    break;
+    case 3:
+      pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
+      while (abs(pos-targetPosition) > 1) {
+        pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
+      }
+    break;
   }
 }
 
