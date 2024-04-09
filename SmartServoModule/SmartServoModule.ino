@@ -45,7 +45,16 @@
 #define MAX_PROGRAMS 256
 
 // Module properties
-char moduleName[] = "SmartServo"; 
+char moduleName[] = "Servo"; 
+char* eventNames[] = {"Ch1M1Run", "Ch1M1End", "Ch1M2Run", "Ch1M2End", "Ch1M3Run", "Ch1M3End",
+                      "Ch2M1Run", "Ch2M1End", "Ch2M2Run", "Ch2M2End", "Ch2M3Run", "Ch2M3End",
+                      "Ch3M1Run", "Ch3M1End", "Ch3M2Run", "Ch3M2End", "Ch3M3Run", "Ch3M3End"};
+byte nEventNames = (sizeof(eventNames)/sizeof(char *));
+byte eventCode[3][3][2] = { 
+                     { {1, 2}, {3, 4}, {5, 6} },
+                     { {7, 8}, {9, 10}, {11, 12} },
+                     { {13, 14}, {15, 16}, {17, 18} } };
+
 const byte dioPins[3] = {9,8,7};
 const byte circuitRevisionArray[5] = {2,3,4,5,6};
 
@@ -69,7 +78,8 @@ const uint32_t validBaudRates[7] = {4000000, 57600, 1000000, 2000000, 3000000, 1
 // Motor program metadata
 bool program_Loaded[MAX_PROGRAMS] = {false}; // true for each program if a motor program was loaded via USB
 bool program_Running[MAX_PROGRAMS] = {false}; // true for each program if the program was triggered and is actively executing
-uint8_t program_nSteps[MAX_PROGRAMS] = {false}; // Number of steps in each program
+uint8_t program_Origin[MAX_PROGRAMS] = {0}; // Indicates which serial interface triggered the program 0 = USB 1 = State Machine
+uint8_t program_nSteps[MAX_PROGRAMS] = {0}; // Number of steps in each program
 uint8_t program_currentStep[MAX_PROGRAMS] = {0}; // Tracks the current step in each program as it is executed
 uint32_t program_currentTime[MAX_PROGRAMS] = {0}; // Tracks the current time with respect to program start as each program is executed
 uint32_t program_currentLoopTime[MAX_PROGRAMS] = {0}; // Tracks the current time with respect to trigger start as each looping program is executed
@@ -373,6 +383,7 @@ void loop() {
         program_currentStep[programID] = 0;
         program_currentTime[programID] = 0;
         program_currentLoopTime[programID] = 0;
+        program_Origin[programID] = opSource;
         program_Running[programID] = true;
       break;
 
@@ -450,12 +461,14 @@ void loop() {
 void programHandler() {
   uint8_t thisStep = 0;
   uint8_t thisAddress = 0;
+  uint8_t thisChannel = 0;
   for (int prog = 0; prog < MAX_PROGRAMS; prog++) {
     if (program_Running[prog]) {
       thisStep = program_currentStep[prog];
       while (program_StepTime[prog][thisStep] == program_currentTime[prog]) {
+        thisChannel = program_Channel[prog][thisStep];
         thisAddress = program_Address[prog][thisStep];
-        switch(program_Channel[prog][thisStep]) {
+        switch(thisChannel) {
           case 1:
             dxl1.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
             dxl1.writeControlTableItem(PROFILE_ACCELERATION, thisAddress, program_GoalAcceleration[prog][thisStep]);
@@ -471,6 +484,9 @@ void programHandler() {
             dxl3.writeControlTableItem(PROFILE_ACCELERATION, thisAddress, program_GoalAcceleration[prog][thisStep]);
             dxl3.setGoalPosition(thisAddress, program_GoalPosition[prog][thisStep], UNIT_DEGREE);
           break;
+        }
+        if (thisChannel < 4 && thisAddress < 4 && program_Origin[prog] == 1) {
+          StateMachineCOM.writeByte(eventCode[thisChannel-1][thisAddress-1][0]);
         }
         thisStep++;
         program_currentStep[prog] = thisStep;
@@ -547,6 +563,10 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
     }
     if (opSource == 0) {
       USBCOM.writeByte(1);
+    } else {
+      if (channel < 4 && address < 4) {
+        StateMachineCOM.writeByte(eventCode[channel-1][address-1][0]);
+      }
     }
   } else {
     if (opSource == 0) {
@@ -589,7 +609,7 @@ void discoverMotors(bool useUSB) {
   int i = 0;
   bool found = false;
   // Detect on channel 1
-  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
@@ -610,7 +630,7 @@ void discoverMotors(bool useUSB) {
     }
   }
     // Detect on channel 2
-  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
@@ -631,7 +651,7 @@ void discoverMotors(bool useUSB) {
     }
   }
     // Detect on channel 3
-  for (int motorIndex = 0; motorIndex < 16; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
@@ -688,6 +708,18 @@ void returnModuleInfo() {
   StateMachineCOM.writeUint32(FIRMWARE_VERSION); // 4-byte firmware version
   StateMachineCOM.writeByte(sizeof(moduleName)-1); // Length of module name
   StateMachineCOM.writeCharArray(moduleName, sizeof(moduleName)-1); // Module name
+  StateMachineCOM.writeByte(1); // 1 if more info follows, 0 if not
+  StateMachineCOM.writeByte('#'); // Op code for: Number of behavior events this module can generate
+  StateMachineCOM.writeByte(18); // 3 channels x 3 motors
+  StateMachineCOM.writeByte(1); // 1 if more info follows, 0 if not
+  StateMachineCOM.writeByte('E'); // Op code for: Behavior event names
+  StateMachineCOM.writeByte(nEventNames);
+  for (int i = 0; i < nEventNames; i++) { // Once for each event name
+    StateMachineCOM.writeByte(strlen(eventNames[i])); // Send event name length
+    for (int j = 0; j < strlen(eventNames[i]); j++) { // Once for each character in this event name
+      StateMachineCOM.writeByte(*(eventNames[i]+j)); // Send the character
+    }
+  }
   if (fsmSupportsHwInfo) {
     StateMachineCOM.writeByte(1); // 1 if more info follows, 0 if not
     StateMachineCOM.writeByte('V'); // Op code for: Hardware major version
