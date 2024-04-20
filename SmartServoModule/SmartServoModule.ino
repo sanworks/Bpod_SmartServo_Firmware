@@ -106,6 +106,7 @@ uint8_t opSource = 0; // Op source, 0 = USB, 1 = State Machine
 uint8_t focusChannel = 0; // The channel currently in focus
 uint8_t focusAddress = 0; // The motor address currently in focus
 uint8_t blocking = 0; // 0: confirm new position goal immediately 1: confirm after movement finishes executing
+uint8_t result = 0; // Result of an op (1 = success, 0 = fail)
 uint32_t nSteps = 0; 
 float value = 0; // Temporary float
 float maxVelocity = 0; // Maximum velocity
@@ -266,19 +267,17 @@ void loop() {
             case 1:
               dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
               dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 2:
               dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
               dxl2.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 3:
               dxl3.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
               dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
           }
+          setGoalPosition(channel, address, pos);
           if (blocking) {
             delayUntilMovementEnd(channel, address, pos);
           }
@@ -302,17 +301,15 @@ void loop() {
           switch(channel) {
             case 1:
               dxl1.setGoalCurrent(address, current, UNIT_PERCENT);
-              dxl1.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 2:
               dxl2.setGoalCurrent(address, current, UNIT_PERCENT);
-              dxl2.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
             case 3:
               dxl3.setGoalCurrent(address, current, UNIT_PERCENT);
-              dxl3.setGoalPosition(address, pos, UNIT_DEGREE);
             break;
           }
+          setGoalPosition(channel, address, pos);
           if (opSource == 0) {
             USBCOM.writeByte(1);
           }
@@ -442,16 +439,22 @@ void loop() {
           newID = USBCOM.readByte();
           switch(channel) {
             case 1:
-              dxl1.setID(address, newID);
+              dxl1.torqueOff(address);
+              result = dxl1.setID(address, newID);
+              dxl1.torqueOn(newID);
             break;
             case 2:
-              dxl2.setID(address, newID);
+              dxl2.torqueOff(address);
+              result = dxl2.setID(address, newID);
+              dxl2.torqueOn(newID);
             break;
             case 3:
-              dxl3.setID(address, newID);
+              dxl3.torqueOff(address);
+              result = dxl3.setID(address, newID);
+              dxl3.torqueOn(newID);
             break;
           }
-          USBCOM.writeByte(1);
+          USBCOM.writeByte(result);
         }
       break;
     }
