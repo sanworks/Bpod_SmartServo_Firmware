@@ -41,8 +41,8 @@
 #define HARDWARE_VERSION 1
 
 // Motor programs
-#define MAX_STEPS 100
-#define MAX_PROGRAMS 256
+#define MAX_STEPS 256
+#define MAX_PROGRAMS 100
 
 // Module properties
 char moduleName[] = "Servo"; 
@@ -87,14 +87,15 @@ uint32_t program_currentLoopTime[MAX_PROGRAMS] = {0}; // Tracks the current time
 // Motor program content
 uint8_t program_Channel[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor channel for each instruction in each motor program
 uint8_t program_Address[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor address for each instruction in each motor program
-float program_GoalPosition[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal position for each instruction in each motor program
-float program_GoalVelocity[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal velocity for each instruction in each motor program
-float program_GoalAcceleration[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal acceleration for each instruction in each motor program
-uint32_t program_StepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
-uint32_t program_LoopTime[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
+DMAMEM float program_GoalPosition[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal position for each instruction in each motor program
+DMAMEM float program_GoalVelocity[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal velocity for each instruction in each motor program
+DMAMEM float program_GoalAcceleration[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal acceleration for each instruction in each motor program
+DMAMEM uint32_t program_StepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
+DMAMEM uint32_t program_LoopTime[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
 
 // General variables
-uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity
+uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
+float currentPosition[3][8] = {0}; // Last known position
 uint8_t address = 1; // Motor address on a channel (1-253)
 uint8_t channel = 1; // Hardware serial channel targeted (1-3)
 uint8_t newMode = 1; // Motor mode
@@ -114,6 +115,7 @@ float maxAccel = 0; // Maximum acceleration
 float pos = 0; // Position (degrees)
 float current = 0; // Current limit (percent)
 float newVelocity = 0; // Velocity (RPM)
+float newPosition= 0;
 uint8_t circuitRevision = 0;
 
 
@@ -262,7 +264,7 @@ void loop() {
         pos = readFloatFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
-        if (motorMode[channel][address] == 1) {
+        if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
           switch(channel) {
             case 1:
               dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
@@ -280,9 +282,9 @@ void loop() {
           setGoalPosition(channel, address, pos);
           if (blocking) {
             delayUntilMovementEnd(channel, address, pos);
-          }
-          if (opSource == 0) {
-            USBCOM.writeByte(1);
+            if (opSource == 0) {
+              USBCOM.writeByte(1);
+            }
           }
         } else {
           if (opSource == 0) {
@@ -310,9 +312,6 @@ void loop() {
             break;
           }
           setGoalPosition(channel, address, pos);
-          if (opSource == 0) {
-            USBCOM.writeByte(1);
-          }
         } else {
           if (opSource == 0) {
             USBCOM.writeByte(0);
@@ -343,6 +342,22 @@ void loop() {
           if (opSource == 0) {
             USBCOM.writeByte(0);
           }
+        }
+      break;
+
+      case 'S': // Step a given distance from the current shaft position (in motor mode 5)
+        channel = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
+        pos = readFloatFromSource(opSource);
+        newPosition = currentPosition[channel][address]+pos;
+        stepMotor(channel, address, newPosition);
+      break;
+
+      case '^': // Step a given distance using the motor currently in focus, at current velocity and acceleration
+        pos = readFloatFromSource(opSource);
+        newPosition = currentPosition[channel][address]+pos;
+        if (focusChannel > 0 && focusAddress  > 0) {
+          stepMotor(focusChannel, focusAddress, newPosition);
         }
       break;
 
@@ -428,6 +443,19 @@ void loop() {
           address = USBCOM.readByte();
           newMode = USBCOM.readByte();
           setMotorMode(channel, address, newMode);
+          if (newMode == 5) {
+            switch(channel) {
+              case 1:
+                currentPosition[channel][address] = dxl1.getPresentPosition(address, UNIT_DEGREE);
+              break;
+              case 2:
+                currentPosition[channel][address] = dxl2.getPresentPosition(address, UNIT_DEGREE);
+              break;
+              case 3:
+                currentPosition[channel][address] = dxl3.getPresentPosition(address, UNIT_DEGREE);
+              break;
+            }
+          }
           USBCOM.writeByte(1);
         }
       break;
@@ -518,17 +546,20 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
   // Convert mode index to dynamixel mode index
   uint8_t dynamixelModeIndex = 0;
   switch(modeIndex) {
-    case 1:
+    case 1: // Position mode
       dynamixelModeIndex = 3;
     break;
-    case 2:
+    case 2: // Extended Position Mode
       dynamixelModeIndex = 4;
     break;
-    case 3:
+    case 3: // Current-Limited Position Mode
       dynamixelModeIndex = 5;
     break;
-    case 4:
+    case 4: // Velocity Mode
       dynamixelModeIndex = 1;
+    break;
+    case 5: // Step Mode (Extended position + auto position reset after each move)
+      dynamixelModeIndex = 4;
     break;
   }
   switch(channel) {
@@ -552,7 +583,9 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
 }
 
 void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
-  if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
+  if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2) 
+                                         || (motorMode[channel][address] == 3)
+                                         || (motorMode[channel][address] == 5)) {
     switch(channel) {
       case 1:
         dxl1.setGoalPosition(address, newPosition, UNIT_DEGREE);
@@ -578,6 +611,18 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
   }
 }
 
+void stepMotor(uint8_t channel, uint8_t address, float newPosition) {
+  setGoalPosition(channel, address, newPosition);
+  delayUntilMovementEnd(channel, address, newPosition);
+  resetExtendedPosition(channel, address);
+  if (newPosition > 0) {
+      newPosition = newPosition-(floor(newPosition/360)*360);
+  } else if (newPosition < 0) {
+      newPosition = 360-(abs(newPosition)-(floor(abs(newPosition)/360)*360));
+  }
+  currentPosition[channel][address] = newPosition;
+}
+
 void delayUntilMovementEnd(uint8_t channel, uint8_t address, float targetPosition) {
   float pos = 0;
   switch (channel) {
@@ -598,6 +643,27 @@ void delayUntilMovementEnd(uint8_t channel, uint8_t address, float targetPositio
       while (abs(pos-targetPosition) > 1) {
         pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
       }
+    break;
+  }
+  delay(100); // A safe margin for the final degree
+}
+
+void resetExtendedPosition(uint8_t channel, uint8_t address) {
+  switch (channel) {
+    case 1:
+      dxl1.torqueOff(address);
+      dxl1.clear(address, 0x01, 0, 1000);
+      dxl1.torqueOn(address);
+    break;
+    case 2:
+      dxl2.torqueOff(address);
+      dxl2.clear(address, 0x01, 0, 1000);
+      dxl2.torqueOn(address);
+    break;
+    case 3:
+      dxl3.torqueOff(address);
+      dxl3.clear(address, 0x01, 0, 1000);
+      dxl3.torqueOn(address);
     break;
   }
 }
