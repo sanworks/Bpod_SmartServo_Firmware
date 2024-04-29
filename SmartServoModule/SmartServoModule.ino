@@ -44,6 +44,9 @@
 #define MAX_STEPS 256
 #define MAX_PROGRAMS 100
 
+// Motor properties
+#define MAX_MOTOR_ADDR 8
+
 // Module properties
 char moduleName[] = "Servo"; 
 char* eventNames[] = {"Ch1M1Run", "Ch1M1End", "Ch1M2Run", "Ch1M2End", "Ch1M3Run", "Ch1M3End",
@@ -77,7 +80,7 @@ const uint32_t validBaudRates[7] = {4000000, 57600, 1000000, 2000000, 3000000, 1
 
 // Motor program metadata
 bool program_Loaded[MAX_PROGRAMS] = {false}; // true for each program if a motor program was loaded via USB
-bool program_Running[MAX_PROGRAMS] = {false}; // true for each program if the program was triggered and is actively executing
+volatile bool program_Running[MAX_PROGRAMS] = {false}; // true for each program if the program was triggered and is actively executing
 uint8_t program_Origin[MAX_PROGRAMS] = {0}; // Indicates which serial interface triggered the program 0 = USB 1 = State Machine
 uint8_t program_nSteps[MAX_PROGRAMS] = {0}; // Number of steps in each program
 uint8_t program_MoveType[MAX_PROGRAMS] = {0};// Program move type. 0 = movements defined by position/velocity/acceleration. 
@@ -96,9 +99,20 @@ DMAMEM float program_GoalCurrent[MAX_PROGRAMS][MAX_STEPS] = {0}; // Current limi
 uint32_t program_StepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
 uint32_t program_LoopTime[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
 
+// DIO parameters
+uint8_t dio_FallingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
+uint8_t dio_RisingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
+uint8_t dio_TargetProgram[3] = {0}; // Target motor program for each DIO channel 
+uint32_t dio_Debounce[3] = {100, 100, 100}; // Debounce interval (units = multiples of the 100us HW timer interval)
+
 // General variables
-uint8_t motorMode[3][8] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
-float currentPosition[3][8] = {0}; // Last known position
+bool motorDetected[3][MAX_MOTOR_ADDR] = {false}; // Set to true if motor is detected
+uint8_t motorMode[3][MAX_MOTOR_ADDR] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
+float currentPosition[3][MAX_MOTOR_ADDR] = {0}; // Last known position
+uint8_t currentDioState[3] = {0}; // Current state of DIO lines
+uint8_t lastDioState[3] = {0}; // Last known DIO state
+uint32_t debounceCounter[3] = {0}; // count of hardware timer calls since debounce period started
+bool inDebounce[3] = {0}; // true if in debounce interval, false if not
 uint8_t address = 1; // Motor address on a channel (1-253)
 uint8_t channel = 1; // Hardware serial channel targeted (1-3)
 uint8_t newMode = 1; // Motor mode
@@ -138,7 +152,7 @@ void setup() {
 
   // Initialize DIO pins as input (high impedance)
   for (int i = 0; i < 3; i++) {
-    pinMode(dioPins[i], INPUT);
+    pinMode(dioPins[i], INPUT_PULLUP);
   }
 
   // Read hardware revision from circuit board (an array of grounded pins indicates revision in binary, grounded = 1, floating = 0)
@@ -404,14 +418,49 @@ void loop() {
 
       case 'R': // Run motor program
         programID = readByteFromSource(opSource);
-        program_currentStep[programID] = 0;
-        program_currentTime[programID] = 0;
-        program_currentLoopTime[programID] = 0;
-        program_Origin[programID] = opSource;
-        program_Running[programID] = true;
+        startProgram(programID, opSource);
       break;
 
-      case '+': // Return current position via USB
+      case '=': // Set target motor program for each DIO channel 
+        if (opSource == 0) {
+          USBCOM.readByteArray(dio_TargetProgram, 3);
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '+': // Set operation on DIO rising edge,   0 = No Operation, 
+                                                    // 1 = Start Target Program
+                                                    // 2 = Stop Target Program after current move
+                                                    // 3 = Emergency Stop: Torque --> 0 for all motors, stop all programs.
+                                                    //     Torque can be re-enabled by setting the motor mode for each motor.
+        if (opSource == 0) {
+          USBCOM.readByteArray(dio_RisingEdgeFcn, 3);
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '-': // Set operation on DIO falling edge, Same codes as op '+' above
+        if (opSource == 0) {
+          USBCOM.readByteArray(dio_FallingEdgeFcn, 3);
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '~': // Set debounce interval (units = multiples of the 100us HW timer interva
+        if (opSource == 0) {
+          USBCOM.readUint32Array(dio_Debounce, 3);
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '!': // Emergency stop
+        emergency_stop();
+        if (opSource == 0) {
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '%': // Return current position via USB
         if (opSource == 0) {
           channel = USBCOM.readByte();
           address = USBCOM.readByte();
@@ -505,6 +554,49 @@ void programHandler() {
   uint8_t thisStep = 0;
   uint8_t thisAddress = 0;
   uint8_t thisChannel = 0;
+
+  // Update DIO
+  for (int i = 0; i < 3; i++) {
+    if (!inDebounce[i]) {
+      currentDioState[i] = digitalReadFast(dioPins[i]);
+      if (currentDioState[i] == 0 && lastDioState[i] == 1) {
+        switch(dio_FallingEdgeFcn[i]) {
+          case 1:
+            startProgram(dio_TargetProgram[i], 2);
+          break;
+          case 2:
+            program_Running[dio_TargetProgram[i]] = false;
+          break;
+          case 3:
+            emergency_stop();
+          break;
+        }
+        inDebounce[i] = true;
+      } else if (currentDioState[i] == 1 && lastDioState[i] == 0) {
+        switch(dio_RisingEdgeFcn[i]) {
+          case 1:
+            startProgram(dio_TargetProgram[i], 2);
+          break;
+          case 2:
+            stopProgram(dio_TargetProgram[i]);
+          break;
+          case 3:
+            emergency_stop();
+          break;
+        }
+        inDebounce[i] = true;
+      }
+      lastDioState[i] = currentDioState[i];
+    } else { // Debounce period
+      debounceCounter[i]++;
+      if (debounceCounter[i] > dio_Debounce[i]) {
+        debounceCounter[i] = 0;
+        inDebounce[i] = false;
+      }
+    }
+  }
+
+  // Run motor program step(s)
   for (int prog = 0; prog < MAX_PROGRAMS; prog++) {
     if (program_Running[prog]) {
       thisStep = program_currentStep[prog];
@@ -563,8 +655,6 @@ void programHandler() {
     }
   }
 }
-
-
 
 void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
   // Convert mode index to dynamixel mode index
@@ -692,6 +782,35 @@ void resetExtendedPosition(uint8_t channel, uint8_t address) {
   }
 }
 
+void startProgram(uint8_t programID, uint8_t opSource) {
+  program_currentStep[programID] = 0;
+  program_currentTime[programID] = 0;
+  program_currentLoopTime[programID] = 0;
+  program_Origin[programID] = opSource;
+  program_Running[programID] = true;
+}
+
+void stopProgram(uint8_t programID) {
+  program_Running[programID] = false;
+}
+
+void emergency_stop() { // Stop all motors, leaving torque off. Motors must then be individually reinitialized by setting motor mode.
+  for (int i = 0; i < 3; i++) {
+    program_Running[i] = false;
+  }
+  for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
+    if (motorDetected[0][addr]) {
+      dxl1.torqueOff(addr);
+    }
+    if (motorDetected[1][addr]) {
+      dxl2.torqueOff(addr);
+    }
+    if (motorDetected[2][addr]) {
+      dxl3.torqueOff(addr);
+    }
+  }
+}
+
 void clearMotorPrograms() {
   for (int i = 0; i < MAX_PROGRAMS; i++) {
     program_Loaded[programID] = false;
@@ -702,13 +821,14 @@ void discoverMotors(bool useUSB) {
   int i = 0;
   bool found = false;
   // Detect on channel 1
-  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < MAX_MOTOR_ADDR; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
       dxl1.begin(validBaudRates[i]);
       if (dxl1.ping(motorIndex)) {
         found = true;
+        motorDetected[0][motorIndex] = true;
         dxl1.torqueOff(motorIndex);
         dxl1.setBaudrate(motorIndex, 4000000);
         dxl1.begin(4000000);
@@ -723,13 +843,14 @@ void discoverMotors(bool useUSB) {
     }
   }
     // Detect on channel 2
-  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < MAX_MOTOR_ADDR; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
       dxl2.begin(validBaudRates[i]);
       if (dxl2.ping(motorIndex)) {
         found = true;
+        motorDetected[1][motorIndex] = true;
         dxl2.torqueOff(motorIndex);
         dxl2.setBaudrate(motorIndex, 4000000);
         dxl2.begin(4000000);
@@ -744,13 +865,14 @@ void discoverMotors(bool useUSB) {
     }
   }
     // Detect on channel 3
-  for (int motorIndex = 0; motorIndex < 8; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < MAX_MOTOR_ADDR; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
       dxl3.begin(validBaudRates[i]);
       if (dxl3.ping(motorIndex)) {
         found = true;
+        motorDetected[2][motorIndex] = true;
         dxl3.torqueOff(motorIndex);
         dxl3.setBaudrate(motorIndex, 4000000);
         dxl3.begin(4000000);
