@@ -45,7 +45,7 @@
 #define MAX_PROGRAMS 100
 
 // Motor properties
-#define MAX_MOTOR_ADDR 8
+#define MAX_MOTOR_ADDR 3
 
 // Module properties
 char moduleName[] = "Servo"; 
@@ -109,6 +109,9 @@ uint32_t dio_Debounce[3] = {100, 100, 100}; // Debounce interval (units = multip
 bool motorDetected[3][MAX_MOTOR_ADDR] = {false}; // Set to true if motor is detected
 uint8_t motorMode[3][MAX_MOTOR_ADDR] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
 float currentPosition[3][MAX_MOTOR_ADDR] = {0}; // Last known position
+bool trackMovement[3][MAX_MOTOR_ADDR] = {false}; // True if tracking a movement, to send a behavior event to the FSM when the movement ends
+uint8_t trackMovementSource[3][MAX_MOTOR_ADDR] = {0}; // Source serial interface of track movement (same as opSource, 0 = USB, 1 = State Machine)
+float trackMovementGoal[3][MAX_MOTOR_ADDR] = {0}; // Goal position of tracked movement
 uint8_t currentDioState[3] = {0}; // Current state of DIO lines
 uint8_t lastDioState[3] = {0}; // Last known DIO state
 uint32_t debounceCounter[3] = {0}; // count of hardware timer calls since debounce period started
@@ -134,6 +137,7 @@ float pos = 0; // Position (degrees)
 float current = 0; // Current limit (percent)
 float newVelocity = 0; // Velocity (RPM)
 float newPosition= 0;
+float thisMovementGoal = 0;
 uint8_t circuitRevision = 0;
 
 
@@ -166,7 +170,7 @@ void setup() {
   circuitRevision = 31-circuitRevision; 
 
   // Start hardware timer
-  hardwareTimer.begin(programHandler, 100);
+  hardwareTimer.begin(programHandler, 1000);
 }
 
 void loop() {
@@ -282,7 +286,7 @@ void loop() {
         pos = readFloatFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
-        if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2)) {
+        if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2)) {
           switch(channel) {
             case 1:
               dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
@@ -317,7 +321,7 @@ void loop() {
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         current = readFloatFromSource(opSource);
-        if (motorMode[channel][address] == 3) {
+        if (motorMode[channel-1][address-1] == 3) {
           switch(channel) {
             case 1:
               dxl1.setGoalCurrent(address, current, UNIT_PERCENT);
@@ -341,7 +345,7 @@ void loop() {
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         newVelocity = readFloatFromSource(opSource);
-        if (motorMode[channel][address] == 4) {
+        if (motorMode[channel-1][address-1] == 4) {
           switch(channel) {
             case 1:
               dxl1.setGoalVelocity(address, newVelocity, UNIT_RPM);
@@ -367,7 +371,7 @@ void loop() {
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
-        newPosition = currentPosition[channel][address]+pos;
+        newPosition = currentPosition[channel-1][address-1]+pos;
         stepMotor(channel, address, newPosition);
       break;
 
@@ -507,13 +511,13 @@ void loop() {
           if (newMode == 5) {
             switch(channel) {
               case 1:
-                currentPosition[channel][address] = dxl1.getPresentPosition(address, UNIT_DEGREE);
+                currentPosition[channel-1][address-1] = dxl1.getPresentPosition(address, UNIT_DEGREE);
               break;
               case 2:
-                currentPosition[channel][address] = dxl2.getPresentPosition(address, UNIT_DEGREE);
+                currentPosition[channel-1][address-1] = dxl2.getPresentPosition(address, UNIT_DEGREE);
               break;
               case 3:
-                currentPosition[channel][address] = dxl3.getPresentPosition(address, UNIT_DEGREE);
+                currentPosition[channel-1][address-1] = dxl3.getPresentPosition(address, UNIT_DEGREE);
               break;
             }
           }
@@ -654,9 +658,44 @@ void programHandler() {
       }
     }
   }
+  // Update tracked movements
+  for (int chan = 0; chan < 3; chan++) {
+    for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
+      if (trackMovement[chan][addr]) {
+        switch(chan+1) {
+          case 1:
+            pos = dxl1.getPresentPosition(addr+1, UNIT_DEGREE);
+          break;
+          case 2:
+            pos = dxl2.getPresentPosition(addr+1, UNIT_DEGREE);
+          break;
+          case 3:
+            pos = dxl3.getPresentPosition(addr+1, UNIT_DEGREE);
+          break;
+        }
+        thisMovementGoal = trackMovementGoal[chan][addr];
+        if (abs(pos-thisMovementGoal) < 1) {
+          if (trackMovementSource[chan][addr] == 1) {
+            StateMachineCOM.writeByte(eventCode[chan][addr][1]);
+          }
+          trackMovement[chan][addr] = false;
+          if (motorMode[chan][addr] == 5) { // In step mode, clear position
+            delayMicroseconds(100000); // Wait for movement to fully end (Todo: Replace with better indicator!)
+            resetExtendedPosition(chan+1, addr+1);
+            if (thisMovementGoal > 0) {
+                thisMovementGoal = thisMovementGoal-(floor(thisMovementGoal/360)*360);
+            } else if (thisMovementGoal < 0) {
+                thisMovementGoal = 360-(abs(thisMovementGoal)-(floor(abs(thisMovementGoal)/360)*360));
+            }
+            currentPosition[chan][addr] = thisMovementGoal;
+          }
+        }
+      }
+    }
+  }
 }
 
-void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
+void setMotorMode(uint8_t channel, uint8_t address, uint8_t modeIndex) {
   // Convert mode index to dynamixel mode index
   uint8_t dynamixelModeIndex = 0;
   switch(modeIndex) {
@@ -678,28 +717,28 @@ void setMotorMode(uint8_t channel, uint8_t motorIndex, uint8_t modeIndex) {
   }
   switch(channel) {
     case 1:
-      dxl1.torqueOff(motorIndex);
-      dxl1.setOperatingMode(motorIndex, dynamixelModeIndex);
-      dxl1.torqueOn(motorIndex);
+      dxl1.torqueOff(address);
+      dxl1.setOperatingMode(address, dynamixelModeIndex);
+      dxl1.torqueOn(address);
     break;
     case 2:
-      dxl2.torqueOff(motorIndex);
-      dxl2.setOperatingMode(motorIndex, dynamixelModeIndex);
-      dxl2.torqueOn(motorIndex);
+      dxl2.torqueOff(address);
+      dxl2.setOperatingMode(address, dynamixelModeIndex);
+      dxl2.torqueOn(address);
     break;
     case 3:
-      dxl3.torqueOff(motorIndex);
-      dxl3.setOperatingMode(motorIndex, dynamixelModeIndex);
-      dxl3.torqueOn(motorIndex);
+      dxl3.torqueOff(address);
+      dxl3.setOperatingMode(address, dynamixelModeIndex);
+      dxl3.torqueOn(address);
     break;
   }
-  motorMode[channel][motorIndex] = modeIndex;
+  motorMode[channel-1][address-1] = modeIndex;
 }
 
 void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
-  if ((motorMode[channel][address] == 1) || (motorMode[channel][address] == 2) 
-                                         || (motorMode[channel][address] == 3)
-                                         || (motorMode[channel][address] == 5)) {
+  if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2) 
+                                         || (motorMode[channel-1][address-1] == 3)
+                                         || (motorMode[channel-1][address-1] == 5)) {
     switch(channel) {
       case 1:
         dxl1.setGoalPosition(address, newPosition, UNIT_DEGREE);
@@ -711,12 +750,13 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
         dxl3.setGoalPosition(address, newPosition, UNIT_DEGREE);
       break;
     }
+    trackMovementSource[channel-1][address-1] = opSource;
+    trackMovementGoal[channel-1][address-1] = newPosition;
+    trackMovement[channel-1][address-1] = true;
     if (opSource == 0) {
       USBCOM.writeByte(1);
     } else {
-      if (channel < 4 && address < 4) {
-        StateMachineCOM.writeByte(eventCode[channel-1][address-1][0]);
-      }
+      StateMachineCOM.writeByte(eventCode[channel-1][address-1][0]);
     }
   } else {
     if (opSource == 0) {
@@ -727,14 +767,6 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
 
 void stepMotor(uint8_t channel, uint8_t address, float newPosition) {
   setGoalPosition(channel, address, newPosition);
-  delayUntilMovementEnd(channel, address, newPosition);
-  resetExtendedPosition(channel, address);
-  if (newPosition > 0) {
-      newPosition = newPosition-(floor(newPosition/360)*360);
-  } else if (newPosition < 0) {
-      newPosition = 360-(abs(newPosition)-(floor(abs(newPosition)/360)*360));
-  }
-  currentPosition[channel][address] = newPosition;
 }
 
 void delayUntilMovementEnd(uint8_t channel, uint8_t address, float targetPosition) {
