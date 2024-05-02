@@ -139,6 +139,7 @@ float newVelocity = 0; // Velocity (RPM)
 float newPosition= 0;
 float thisMovementGoal = 0;
 uint8_t circuitRevision = 0;
+uint32_t monitorStartTime = 0; 
 
 
 void setup() {
@@ -168,7 +169,7 @@ void setup() {
     pinMode(circuitRevisionArray[i], INPUT);
   }
   circuitRevision = 31-circuitRevision; 
-
+  monitorStartTime = micros();
   // Start hardware timer
   hardwareTimer.begin(programHandler, 1000);
 }
@@ -552,6 +553,43 @@ void loop() {
       break;
     }
   }
+  // Update tracked movements
+  if (micros() - monitorStartTime > 1000) {
+    for (int chan = 0; chan < 3; chan++) {
+      for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
+        if (trackMovement[chan][addr]) {
+          switch(chan+1) {
+            case 1:
+              pos = dxl1.getPresentPosition(addr+1, UNIT_DEGREE);
+            break;
+            case 2:
+              pos = dxl2.getPresentPosition(addr+1, UNIT_DEGREE);
+            break;
+            case 3:
+              pos = dxl3.getPresentPosition(addr+1, UNIT_DEGREE);
+            break;
+          }
+          thisMovementGoal = trackMovementGoal[chan][addr];
+          if (abs(pos-thisMovementGoal) < 1) {
+            if (trackMovementSource[chan][addr] == 1) {
+              StateMachineCOM.writeByte(eventCode[chan][addr][1]);
+            }
+            trackMovement[chan][addr] = false;
+            if (motorMode[chan][addr] == 5) { // In step mode, clear position
+              delayMicroseconds(100000); // Wait for movement to fully end (Todo: Replace with better indicator!)
+              resetExtendedPosition(chan+1, addr+1);
+              if (thisMovementGoal > 0) {
+                  thisMovementGoal = thisMovementGoal-(floor(thisMovementGoal/360)*360);
+              } else if (thisMovementGoal < 0) {
+                  thisMovementGoal = 360-(abs(thisMovementGoal)-(floor(abs(thisMovementGoal)/360)*360));
+              }
+              currentPosition[chan][addr] = thisMovementGoal;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 void programHandler() {
@@ -654,41 +692,6 @@ void programHandler() {
         program_currentLoopTime[prog]++;
         if (program_currentLoopTime[prog] >= program_LoopTime[prog]) {
           program_Running[prog] = false;
-        }
-      }
-    }
-  }
-  // Update tracked movements
-  for (int chan = 0; chan < 3; chan++) {
-    for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
-      if (trackMovement[chan][addr]) {
-        switch(chan+1) {
-          case 1:
-            pos = dxl1.getPresentPosition(addr+1, UNIT_DEGREE);
-          break;
-          case 2:
-            pos = dxl2.getPresentPosition(addr+1, UNIT_DEGREE);
-          break;
-          case 3:
-            pos = dxl3.getPresentPosition(addr+1, UNIT_DEGREE);
-          break;
-        }
-        thisMovementGoal = trackMovementGoal[chan][addr];
-        if (abs(pos-thisMovementGoal) < 1) {
-          if (trackMovementSource[chan][addr] == 1) {
-            StateMachineCOM.writeByte(eventCode[chan][addr][1]);
-          }
-          trackMovement[chan][addr] = false;
-          if (motorMode[chan][addr] == 5) { // In step mode, clear position
-            delayMicroseconds(100000); // Wait for movement to fully end (Todo: Replace with better indicator!)
-            resetExtendedPosition(chan+1, addr+1);
-            if (thisMovementGoal > 0) {
-                thisMovementGoal = thisMovementGoal-(floor(thisMovementGoal/360)*360);
-            } else if (thisMovementGoal < 0) {
-                thisMovementGoal = 360-(abs(thisMovementGoal)-(floor(abs(thisMovementGoal)/360)*360));
-            }
-            currentPosition[chan][addr] = thisMovementGoal;
-          }
         }
       }
     }
