@@ -94,7 +94,6 @@ uint8_t program_Channel[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor channel for eac
 uint8_t program_Address[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor address for each instruction in each motor program
 DMAMEM float program_GoalPosition[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal position for each instruction in each motor program
 DMAMEM float program_GoalVelocity[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal velocity for each instruction in each motor program (used in program_MoveType 0)
-DMAMEM float program_GoalAcceleration[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal acceleration for each instruction in each motor program (used in program_MoveType 0)
 DMAMEM float program_GoalCurrent[MAX_PROGRAMS][MAX_STEPS] = {0}; // Current limit on movement to goal, proportional to max torque (used in program_MoveType 1)
 uint32_t program_StepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
 uint32_t program_LoopTime[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
@@ -411,9 +410,6 @@ void loop() {
             }
           }
           for (int i = 0; i < nSteps; i++) {
-              program_GoalAcceleration[programID][i] = USBCOM.readFloat();
-          }
-          for (int i = 0; i < nSteps; i++) {
             program_StepTime[programID][i] = USBCOM.readUint32();
           }
           program_Loaded[programID] = true;
@@ -649,7 +645,6 @@ void programHandler() {
           case 1:
             if (program_MoveType[prog] == 0) {
               dxl1.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-              dxl1.writeControlTableItem(PROFILE_ACCELERATION, thisAddress, program_GoalAcceleration[prog][thisStep]);
             } else {
               dxl1.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
             }
@@ -658,7 +653,6 @@ void programHandler() {
           case 2:
             if (program_MoveType[prog] == 0) {
               dxl2.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-              dxl2.writeControlTableItem(PROFILE_ACCELERATION, thisAddress, program_GoalAcceleration[prog][thisStep]);
             } else {
               dxl2.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
             }
@@ -667,7 +661,6 @@ void programHandler() {
           case 3:
             if (program_MoveType[prog] == 0) {
               dxl3.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-              dxl3.writeControlTableItem(PROFILE_ACCELERATION, thisAddress, program_GoalAcceleration[prog][thisStep]);
             } else {
               dxl3.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
             }
