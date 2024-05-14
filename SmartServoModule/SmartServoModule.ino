@@ -29,6 +29,7 @@
 
 #include <Dynamixel2Arduino.h>
 #include "ArCOM.h"
+#include "T4PortHandler.h"
 
 // ---Macros---
 // Pins
@@ -68,35 +69,54 @@ using namespace ControlTableItem;
 ArCOM USBCOM(Serial);
 ArCOM StateMachineCOM(Serial1);
 byte StateMachineSerialBuf[192] = {0}; // Extra memory for state machine serial buffer
-Dynamixel2Arduino dxl1(Serial3, DXL_DIR_PIN1);
-Dynamixel2Arduino dxl2(Serial4, DXL_DIR_PIN2);
-Dynamixel2Arduino dxl3(Serial5, DXL_DIR_PIN3);
+Dynamixel2Arduino dxl1;
+T4PortHandler dxl_port1(Serial3, DXL_DIR_PIN1);
+byte Serial3Buf[192] = {0}; // Extra memory for port 1 serial buffer
+Dynamixel2Arduino dxl2;
+T4PortHandler dxl_port2(Serial4, DXL_DIR_PIN2);
+byte Serial4Buf[192] = {0}; // Extra memory for port 2 serial buffer
+Dynamixel2Arduino dxl3;
+T4PortHandler dxl_port3(Serial5, DXL_DIR_PIN3);
+byte Serial5Buf[192] = {0}; // Extra memory for port 3 serial buffer
 
 // Hardware timer
 IntervalTimer hardwareTimer; // Hardware timer to create even sampling
 
 // Constants
 const uint32_t validBaudRates[7] = {4000000, 57600, 1000000, 2000000, 3000000, 115200, 9600}; // Ordered by most likely encounters during auto-detection
+const float vel2Units = 262.08; // Conversion of revolutions per second to Dynamixel's internal profile velocity units
+const float acc2Units = 60/214.577; // Conversion of revolutions per second^2 to Dynamixel's internal profile acceleration units
+const float current2Units = 1; // Conversion of mA to Dynamixel's internal current limit units
 
 // Motor program metadata
-bool program_Loaded[MAX_PROGRAMS] = {false}; // true for each program if a motor program was loaded via USB
-volatile bool program_Running[MAX_PROGRAMS] = {false}; // true for each program if the program was triggered and is actively executing
-uint8_t program_Origin[MAX_PROGRAMS] = {0}; // Indicates which serial interface triggered the program 0 = USB 1 = State Machine
+bool program_loaded[MAX_PROGRAMS] = {false}; // true for each program if a motor program was loaded via USB
+volatile bool program_running[MAX_PROGRAMS] = {false}; // true for each program if the program was triggered and is actively executing
+uint8_t program_origin[MAX_PROGRAMS] = {0}; // Indicates which serial interface triggered the program 0 = USB 1 = State Machine
 uint8_t program_nSteps[MAX_PROGRAMS] = {0}; // Number of steps in each program
-uint8_t program_MoveType[MAX_PROGRAMS] = {0};// Program move type. 0 = movements defined by position/velocity/acceleration. 
                                          //               1 = movements defined by position/motor current limit
+uint8_t program_moveType[MAX_PROGRAMS] = {0}; // Move type for each instruction in each motor program. 0 = velocity limited, 1 = current limited 
 uint8_t program_currentStep[MAX_PROGRAMS] = {0}; // Tracks the current step in each program as it is executed
 uint32_t program_currentTime[MAX_PROGRAMS] = {0}; // Tracks the current time with respect to program start as each program is executed
-uint32_t program_currentLoopTime[MAX_PROGRAMS] = {0}; // Tracks the current time with respect to trigger start as each looping program is executed
+uint32_t program_loopCount[MAX_PROGRAMS] = {0}; // Tracks the current time with respect to trigger start as each looping program is executed
 
 // Motor program content
-uint8_t program_Channel[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor channel for each instruction in each motor program
-uint8_t program_Address[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor address for each instruction in each motor program
-DMAMEM float program_GoalPosition[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal position for each instruction in each motor program
-DMAMEM float program_GoalVelocity[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal velocity for each instruction in each motor program (used in program_MoveType 0)
-DMAMEM float program_GoalCurrent[MAX_PROGRAMS][MAX_STEPS] = {0}; // Current limit on movement to goal, proportional to max torque (used in program_MoveType 1)
-uint32_t program_StepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
-uint32_t program_LoopTime[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
+uint8_t program_channel[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor channel for each instruction in each motor program
+uint8_t program_address[MAX_PROGRAMS][MAX_STEPS] = {0}; // Motor address for each instruction in each motor program
+DMAMEM float program_goalPosition[MAX_PROGRAMS][MAX_STEPS] = {0}; // Goal position for each instruction in each motor program
+DMAMEM float program_goalMovementLimit[MAX_PROGRAMS][MAX_STEPS] = {0}; // Max velocity (when program_MoveType = 0)  or current limit (when program_MoveType = 1) 
+uint32_t program_stepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
+uint32_t program_nLoops[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
+
+// Structure for type conversion
+union {
+    byte byteArray[4];
+    uint16_t uint16;
+    uint32_t uint32;
+    int8_t int8;
+    int16_t int16;
+    int32_t int32;
+    float floatVal;
+} typeBuffer;
 
 // DIO parameters
 uint8_t dio_FallingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
@@ -130,11 +150,11 @@ uint8_t blocking = 0; // 0: confirm new position goal immediately 1: confirm aft
 uint8_t result = 0; // Result of an op (1 = success, 0 = fail)
 uint32_t nSteps = 0; 
 float value = 0; // Temporary float
-float maxVelocity = 0; // Maximum velocity
+float maxVelocity = 0; // Maximum velocity (Rev / Second)
 float maxAccel = 0; // Maximum acceleration
 float pos = 0; // Position (degrees)
 float current = 0; // Current limit (percent)
-float newVelocity = 0; // Velocity (RPM)
+float newVelocity = 0; // Velocity (Rev / Second)
 float newPosition= 0;
 float thisMovementGoal = 0;
 uint8_t circuitRevision = 0;
@@ -142,17 +162,29 @@ uint32_t monitorStartTime = 0;
 
 
 void setup() {
+  // Initialize hardware serial interfaces
+  Serial1.begin(1312500); // State machine
+  Serial1.addMemoryForRead(StateMachineSerialBuf, 192);
+  Serial3.begin(4000000); // Motor channel 1
+  Serial3.transmitterEnable(DXL_DIR_PIN1);
+  Serial3.addMemoryForRead(Serial3Buf, 192);
+  Serial4.begin(4000000); // Motor channel 2
+  Serial4.transmitterEnable(DXL_DIR_PIN2);
+  Serial4.addMemoryForRead(Serial4Buf, 192);
+  Serial5.begin(4000000); // Motor channel 3
+  Serial5.transmitterEnable(DXL_DIR_PIN3);
+  Serial5.addMemoryForRead(Serial5Buf, 192);
+
   // Setup motor channels
+  dxl1.setPort(dxl_port1);
   dxl1.begin(4000000);
   dxl1.setPortProtocolVersion(2.0);
+  dxl2.setPort(dxl_port2);
   dxl2.begin(4000000);
   dxl2.setPortProtocolVersion(2.0);
+  dxl3.setPort(dxl_port3);
   dxl3.begin(4000000);
   dxl3.setPortProtocolVersion(2.0);
-
-  // Setup state machine UART serial port
-  Serial1.begin(1312500);
-  Serial1.addMemoryForRead(StateMachineSerialBuf, 192);
 
   // Initialize DIO pins as input (high impedance)
   for (int i = 0; i < 3; i++) {
@@ -221,17 +253,7 @@ void loop() {
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
-        switch(channel) {
-            case 1:
-              dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-            break;
-            case 2:
-              dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-            break;
-            case 3:
-              dxl3.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-            break;
-          }
+        writeMaxVelocity_Fast(channel, address, maxVelocity);
           if (opSource == 0) {
             USBCOM.writeByte(1);
           }
@@ -241,17 +263,7 @@ void loop() {
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
-        switch(channel) {
-            case 1:
-              dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-            case 2:
-              dxl2.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-            case 3:
-              dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-          }
+        writeMaxAcceleration_Fast(channel, address, maxAccel);
           if (opSource == 0) {
             USBCOM.writeByte(1);
           }
@@ -287,20 +299,8 @@ void loop() {
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
         if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2)) {
-          switch(channel) {
-            case 1:
-              dxl1.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-              dxl1.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-            case 2:
-              dxl2.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-              dxl2.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-            case 3:
-              dxl3.writeControlTableItem(PROFILE_VELOCITY, address, maxVelocity);
-              dxl3.writeControlTableItem(PROFILE_ACCELERATION, address, maxAccel);
-            break;
-          }
+          writeMaxVelocity_Fast(channel, address, maxVelocity);
+          writeMaxAcceleration_Fast(channel, address, maxAccel);
           setGoalPosition(channel, address, pos);
           if (blocking) {
             delayUntilMovementEnd(channel, address, pos);
@@ -322,17 +322,7 @@ void loop() {
         pos = readFloatFromSource(opSource);
         current = readFloatFromSource(opSource);
         if (motorMode[channel-1][address-1] == 3) {
-          switch(channel) {
-            case 1:
-              dxl1.setGoalCurrent(address, current, UNIT_PERCENT);
-            break;
-            case 2:
-              dxl2.setGoalCurrent(address, current, UNIT_PERCENT);
-            break;
-            case 3:
-              dxl3.setGoalCurrent(address, current, UNIT_PERCENT);
-            break;
-          }
+          writeMaxCurrent_Fast(channel, address, current);
           setGoalPosition(channel, address, pos);
         } else {
           if (opSource == 0) {
@@ -341,22 +331,12 @@ void loop() {
         }
       break;
 
-      case 'V': // Set velocity goal (in motor mode 4). Units = RPM. Sign indicates direction.
+      case 'V': // Set velocity goal (in motor mode 4). Units = rev/s. Sign indicates direction.
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         newVelocity = readFloatFromSource(opSource);
         if (motorMode[channel-1][address-1] == 4) {
-          switch(channel) {
-            case 1:
-              dxl1.setGoalVelocity(address, newVelocity, UNIT_RPM);
-            break;
-            case 2:
-              dxl2.setGoalVelocity(address, newVelocity, UNIT_RPM);
-            break;
-            case 3:
-              dxl3.setGoalVelocity(address, newVelocity, UNIT_RPM);
-            break;
-          }
+          writeGoalVelocity_Fast(channel, address, newVelocity);
           if (opSource == 0) {
             USBCOM.writeByte(1);
           }
@@ -367,7 +347,7 @@ void loop() {
         }
       break;
 
-      case 'S': // Step a given distance from the current shaft position (in motor mode 5)
+      case 'S': // Step a given distance from the current shaft position (in motor mode 5) Units = degrees. Sign indicates direction.
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
@@ -386,33 +366,26 @@ void loop() {
       case 'L': // Load a motor program
         if (opSource == 0) {
           programID = USBCOM.readByte();
-          moveType = USBCOM.readByte();
           nSteps = USBCOM.readByte();
-          program_MoveType[programID] = moveType;
           program_nSteps[programID] = nSteps;
-          program_LoopTime[programID] = USBCOM.readUint32();
+          program_moveType[programID] = USBCOM.readByte();
+          program_nLoops[programID] = USBCOM.readUint32();
           for (int i = 0; i < nSteps; i++) {
-            program_Channel[programID][i] = USBCOM.readByte();
-          }
-          for (int i = 0; i < nSteps; i++) {
-            program_Address[programID][i] = USBCOM.readByte();
+            program_channel[programID][i] = USBCOM.readByte();
           }
           for (int i = 0; i < nSteps; i++) {
-            program_GoalPosition[programID][i] = USBCOM.readFloat();
-          }
-          if (moveType == 0) {
-            for (int i = 0; i < nSteps; i++) {
-              program_GoalVelocity[programID][i] = USBCOM.readFloat();
-            }
-          } else {
-            for (int i = 0; i < nSteps; i++) {
-              program_GoalCurrent[programID][i] = USBCOM.readFloat();
-            }
+            program_address[programID][i] = USBCOM.readByte();
           }
           for (int i = 0; i < nSteps; i++) {
-            program_StepTime[programID][i] = USBCOM.readUint32();
+            program_goalPosition[programID][i] = USBCOM.readFloat();
           }
-          program_Loaded[programID] = true;
+          for (int i = 0; i < nSteps; i++) {
+            program_goalMovementLimit[programID][i] = USBCOM.readFloat();
+          }
+          for (int i = 0; i < nSteps; i++) {
+            program_stepTime[programID][i] = USBCOM.readUint32();
+          }
+          program_loaded[programID] = true;
           USBCOM.writeByte(1); // Acknowledge
         }
       break;
@@ -603,7 +576,7 @@ void programHandler() {
             startProgram(dio_TargetProgram[i], 2);
           break;
           case 2:
-            program_Running[dio_TargetProgram[i]] = false;
+            program_running[dio_TargetProgram[i]] = false;
           break;
           case 3:
             emergency_stop();
@@ -636,38 +609,19 @@ void programHandler() {
 
   // Run motor program step(s)
   for (int prog = 0; prog < MAX_PROGRAMS; prog++) {
-    if (program_Running[prog]) {
+    if (program_running[prog]) {
       thisStep = program_currentStep[prog];
-      while (program_StepTime[prog][thisStep] == program_currentTime[prog]) {
-        thisChannel = program_Channel[prog][thisStep];
-        thisAddress = program_Address[prog][thisStep];
-        switch(thisChannel) {
-          case 1:
-            if (program_MoveType[prog] == 0) {
-              dxl1.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-            } else {
-              dxl1.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
-            }
-            dxl1.setGoalPosition(thisAddress, program_GoalPosition[prog][thisStep], UNIT_DEGREE);
-          break;
-          case 2:
-            if (program_MoveType[prog] == 0) {
-              dxl2.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-            } else {
-              dxl2.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
-            }
-            dxl2.setGoalPosition(thisAddress, program_GoalPosition[prog][thisStep], UNIT_DEGREE);
-          break;
-          case 3:
-            if (program_MoveType[prog] == 0) {
-              dxl3.writeControlTableItem(PROFILE_VELOCITY, thisAddress, program_GoalVelocity[prog][thisStep]);
-            } else {
-              dxl3.setGoalCurrent(thisAddress, program_GoalCurrent[prog][thisStep], UNIT_PERCENT);
-            }
-            dxl3.setGoalPosition(thisAddress, program_GoalPosition[prog][thisStep], UNIT_DEGREE);
-          break;
+      while (program_stepTime[prog][thisStep] == program_currentTime[prog] && thisStep < program_nSteps[prog]) {
+        thisChannel = program_channel[prog][thisStep];
+        thisAddress = program_address[prog][thisStep];
+        if (program_moveType[prog] == 0) {
+          writeMaxVelocity_Fast(thisChannel, thisAddress, program_goalMovementLimit[prog][thisStep]);
+        } else {
+          writeMaxCurrent_Fast(thisChannel, thisAddress, program_goalMovementLimit[prog][thisStep]);
         }
-        if (thisChannel < 4 && thisAddress < 4 && program_Origin[prog] == 1) {
+        writeGoalPosition_Fast(thisChannel, thisAddress, program_goalPosition[prog][thisStep]);
+
+        if (thisChannel < 4 && thisAddress < 4 && program_origin[prog] == 1) {
           StateMachineCOM.writeByte(eventCode[thisChannel-1][thisAddress-1][0]);
         }
         thisStep++;
@@ -677,15 +631,14 @@ void programHandler() {
       if (program_currentStep[prog] == program_nSteps[prog]) {
         program_currentStep[prog] = 0;
         program_currentTime[prog] = 0;
-        if (program_LoopTime[prog] == 0) {
-          program_Running[prog] = false;
-        }  
-      }
-      if (program_LoopTime[prog] > 0) {
-        program_currentLoopTime[prog]++;
-        if (program_currentLoopTime[prog] >= program_LoopTime[prog]) {
-          program_Running[prog] = false;
-        }
+        if (program_nLoops[prog] == 0) {
+          program_running[prog] = false;
+        } else {
+          program_loopCount[prog]++;
+          if (program_loopCount[prog] >= program_nLoops[prog]) {
+            program_running[prog] = false;
+          }
+        } 
       }
     }
   }
@@ -735,17 +688,7 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
   if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2) 
                                          || (motorMode[channel-1][address-1] == 3)
                                          || (motorMode[channel-1][address-1] == 5)) {
-    switch(channel) {
-      case 1:
-        dxl1.setGoalPosition(address, newPosition, UNIT_DEGREE);
-      break;
-      case 2:
-        dxl2.setGoalPosition(address, newPosition, UNIT_DEGREE);
-      break;
-      case 3:
-        dxl3.setGoalPosition(address, newPosition, UNIT_DEGREE);
-      break;
-    }
+    writeGoalPosition_Fast(channel, address, newPosition);
     trackMovementSource[channel-1][address-1] = opSource;
     trackMovementGoal[channel-1][address-1] = newPosition;
     trackMovement[channel-1][address-1] = true;
@@ -758,6 +701,107 @@ void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
     if (opSource == 0) {
       USBCOM.writeByte(0);
     }
+  }
+}
+
+void writeGoalPosition_Fast(uint8_t chan, uint8_t addr, float newPosition) {
+  // Sets the goal position
+  // Args:
+  // chan: Channel (1-3)
+  // addr: Address within channel (1-3)
+  // newPosition: The new goal position. Units = degrees
+  int32_t newPos_Tics = 0;
+  newPos_Tics = (int32_t)round(newPosition*11.375);
+  typeBuffer.int32 = newPos_Tics;
+  switch (chan) {
+    case 1:
+      dxl1.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
+    break;
+    case 2:
+      dxl2.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
+    break;
+    case 3:
+      dxl3.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
+    break;
+  }
+}
+
+void writeGoalVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
+  // Sets the goal velocity (only used in velocity control mode, aka Speed mode)
+  // Args:
+  // chan: Channel (1-3)
+  // addr: Address within channel (1-3)
+  // newPosition: The new goal position. Units = degrees
+  int32_t newVel_Units = 0;
+  newVel_Units = (int32_t)round(newVelocity*vel2Units);
+  typeBuffer.int32 = newVel_Units;
+  switch (chan) {
+    case 1:
+      dxl1.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
+    break;
+    case 2:
+      dxl2.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
+    break;
+    case 3:
+      dxl3.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
+    break;
+  }
+}
+
+void writeMaxVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
+  // Sets the maximum velocity for subsequent position moves
+  // Args:
+  // chan: Channel (1-3)
+  // addr: Address within channel (1-3)
+  // newVelocity: The maximum velocity for subsequent moves. Units = rev/s
+  int32_t newVel_Units = 0;
+  newVel_Units = (int32_t)round(newVelocity*vel2Units); // Convert from rev per second to units
+  typeBuffer.int32 = newVel_Units;
+  switch (chan) {
+    case 1:
+      dxl1.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
+      //dxl1.writeControlTableItem(PROFILE_VELOCITY, addr, newVelocity);
+    break;
+    case 2:
+      dxl2.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
+    break;
+    case 3:
+      dxl3.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
+    break;
+  }
+}
+
+void writeMaxCurrent_Fast(uint8_t chan, uint8_t addr, float newMaxCurrent) {
+  int16_t newCurrent_Units = 0;
+  newCurrent_Units = (int16_t)round(newMaxCurrent);
+  typeBuffer.int16 = newCurrent_Units;
+  switch (chan) {
+    case 1:
+      dxl1.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
+    break;
+    case 2:
+      dxl2.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
+    break;
+    case 3:
+      dxl3.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
+    break;
+  }
+}
+
+void writeMaxAcceleration_Fast(uint8_t chan, uint8_t addr, float newAcceleration) {
+  int32_t newAcc_Units = 0;
+  newAcc_Units = (int32_t)round(newAcceleration*acc2Units); // Convert from rev per second^2 to units
+  typeBuffer.int32 = newAcc_Units;
+  switch (chan) {
+    case 1:
+      dxl1.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
+    break;
+    case 2:
+      dxl2.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
+    break;
+    case 3:
+      dxl3.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
+    break;
   }
 }
 
@@ -813,18 +857,18 @@ void resetExtendedPosition(uint8_t channel, uint8_t address) {
 void startProgram(uint8_t programID, uint8_t opSource) {
   program_currentStep[programID] = 0;
   program_currentTime[programID] = 0;
-  program_currentLoopTime[programID] = 0;
-  program_Origin[programID] = opSource;
-  program_Running[programID] = true;
+  program_loopCount[programID] = 0;
+  program_origin[programID] = opSource;
+  program_running[programID] = true;
 }
 
 void stopProgram(uint8_t programID) {
-  program_Running[programID] = false;
+  program_running[programID] = false;
 }
 
 void emergency_stop() { // Stop all motors, leaving torque off. Motors must then be individually reinitialized by setting motor mode.
   for (int i = 0; i < 3; i++) {
-    program_Running[i] = false;
+    program_running[i] = false;
   }
   for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
     if (motorDetected[0][addr]) {
@@ -841,7 +885,7 @@ void emergency_stop() { // Stop all motors, leaving torque off. Motors must then
 
 void clearMotorPrograms() {
   for (int i = 0; i < MAX_PROGRAMS; i++) {
-    program_Loaded[programID] = false;
+    program_loaded[programID] = false;
   }
 }
 
@@ -867,6 +911,7 @@ void discoverMotors(bool useUSB) {
           USBCOM.writeUint32(dxl1.getModelNumber(motorIndex));
         }
       }
+      delay(1);
       i++;
     }
   }
@@ -889,6 +934,7 @@ void discoverMotors(bool useUSB) {
           USBCOM.writeUint32(dxl2.getModelNumber(motorIndex));
         }
       }
+      delay(1);
       i++;
     }
   }
@@ -911,6 +957,7 @@ void discoverMotors(bool useUSB) {
           USBCOM.writeUint32(dxl3.getModelNumber(motorIndex));
         }
       }
+      delay(1);
       i++;
     }
   }
