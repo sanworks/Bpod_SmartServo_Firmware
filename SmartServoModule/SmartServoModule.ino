@@ -107,16 +107,14 @@ DMAMEM float program_goalMovementLimit[MAX_PROGRAMS][MAX_STEPS] = {0}; // Max ve
 uint32_t program_stepTime[MAX_PROGRAMS][MAX_STEPS] = {0}; // The time to execute each step in each motor program, with respect to program start
 uint32_t program_nLoops[MAX_PROGRAMS] = {0}; // If >0, the program loops for a given amount of time
 
-// Structure for type conversion
-union {
-    byte byteArray[4];
-    uint16_t uint16;
-    uint32_t uint32;
-    int8_t int8;
-    int16_t int16;
-    int32_t int32;
-    float floatVal;
-} typeBuffer;
+// Dynamixel Synchronous write variables
+typedef struct sw_data{
+  int32_t int32;
+  int16_t int16;
+} __attribute__((packed)) sw_data_t;
+sw_data_t sw_data[1];
+DYNAMIXEL::InfoSyncWriteInst_t sw_infos;
+DYNAMIXEL::XELInfoSyncWrite_t info_xels_sw[1];
 
 // DIO parameters
 uint8_t dio_FallingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
@@ -201,6 +199,16 @@ void setup() {
   }
   circuitRevision = 31-circuitRevision; 
   monitorStartTime = micros();
+
+  // Set up synchronous write packet
+  sw_infos.packet.p_buf = nullptr;
+  sw_infos.packet.is_completed = false;
+  sw_infos.addr = 116; // Register for position goal
+  sw_infos.addr_length = 4; // Width of register (bytes)
+  sw_infos.p_xels = info_xels_sw;
+  sw_infos.xel_count = 1;
+  info_xels_sw[0].p_data = (uint8_t*)&sw_data[0].int32;
+
   // Start hardware timer
   hardwareTimer.begin(programHandler, 1000);
 }
@@ -712,18 +720,7 @@ void writeGoalPosition_Fast(uint8_t chan, uint8_t addr, float newPosition) {
   // newPosition: The new goal position. Units = degrees
   int32_t newPos_Tics = 0;
   newPos_Tics = (int32_t)round(newPosition*11.375);
-  typeBuffer.int32 = newPos_Tics;
-  switch (chan) {
-    case 1:
-      dxl1.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
-    break;
-    case 2:
-      dxl2.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
-    break;
-    case 3:
-      dxl3.writeNoResp(addr, 116, typeBuffer.byteArray, 4);
-    break;
-  }
+  writeCtrlTableInt32_Fast(chan, addr, 116, newPos_Tics);
 }
 
 void writeGoalVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
@@ -734,18 +731,7 @@ void writeGoalVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
   // newPosition: The new goal position. Units = degrees
   int32_t newVel_Units = 0;
   newVel_Units = (int32_t)round(newVelocity*vel2Units);
-  typeBuffer.int32 = newVel_Units;
-  switch (chan) {
-    case 1:
-      dxl1.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
-    break;
-    case 2:
-      dxl2.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
-    break;
-    case 3:
-      dxl3.writeNoResp(addr, 104, typeBuffer.byteArray, 4);
-    break;
-  }
+  writeCtrlTableInt32_Fast(chan, addr, 104, newVel_Units);
 }
 
 void writeMaxVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
@@ -756,53 +742,19 @@ void writeMaxVelocity_Fast(uint8_t chan, uint8_t addr, float newVelocity) {
   // newVelocity: The maximum velocity for subsequent moves. Units = rev/s
   int32_t newVel_Units = 0;
   newVel_Units = (int32_t)round(newVelocity*vel2Units); // Convert from rev per second to units
-  typeBuffer.int32 = newVel_Units;
-  switch (chan) {
-    case 1:
-      dxl1.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
-      //dxl1.writeControlTableItem(PROFILE_VELOCITY, addr, newVelocity);
-    break;
-    case 2:
-      dxl2.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
-    break;
-    case 3:
-      dxl3.writeNoResp(addr, 112, typeBuffer.byteArray, 4);
-    break;
-  }
+  writeCtrlTableInt32_Fast(chan, addr, 112, newVel_Units);
 }
 
 void writeMaxCurrent_Fast(uint8_t chan, uint8_t addr, float newMaxCurrent) {
   int16_t newCurrent_Units = 0;
   newCurrent_Units = (int16_t)round(newMaxCurrent);
-  typeBuffer.int16 = newCurrent_Units;
-  switch (chan) {
-    case 1:
-      dxl1.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
-    break;
-    case 2:
-      dxl2.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
-    break;
-    case 3:
-      dxl3.writeNoResp(addr, 102, typeBuffer.byteArray, 2);
-    break;
-  }
+  writeCtrlTableInt16_Fast(chan, addr, 102, newCurrent_Units);
 }
 
 void writeMaxAcceleration_Fast(uint8_t chan, uint8_t addr, float newAcceleration) {
   int32_t newAcc_Units = 0;
   newAcc_Units = (int32_t)round(newAcceleration*acc2Units); // Convert from rev per second^2 to units
-  typeBuffer.int32 = newAcc_Units;
-  switch (chan) {
-    case 1:
-      dxl1.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
-    break;
-    case 2:
-      dxl2.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
-    break;
-    case 3:
-      dxl3.writeNoResp(addr, 108, typeBuffer.byteArray, 4);
-    break;
-  }
+  writeCtrlTableInt32_Fast(chan, addr, 108, newAcc_Units);
 }
 
 void stepMotor(uint8_t channel, uint8_t address, float newPosition) {
@@ -964,6 +916,46 @@ void discoverMotors(bool useUSB) {
   dxl1.begin(4000000);
   dxl2.begin(4000000);
   dxl3.begin(4000000);
+}
+
+void writeCtrlTableInt32_Fast(uint8_t channel, uint8_t motorAddress, uint8_t ctrlTableAddress, int32_t value) {
+  sw_infos.addr = ctrlTableAddress; // Register for position goal
+  sw_infos.addr_length = 4; // Width of register (bytes)
+  info_xels_sw[0].p_data = (uint8_t*)&sw_data[0].int32; // Set packet to read position buffer
+  info_xels_sw[0].id = motorAddress;
+  sw_data[0].int32 = value;
+  sw_infos.is_info_changed = true;
+  switch (channel) {
+    case 1:
+      dxl1.syncWrite(&sw_infos);
+    break;
+    case 2:
+      dxl2.syncWrite(&sw_infos);
+    break;
+    case 3:
+      dxl3.syncWrite(&sw_infos);
+    break;
+  }
+}
+
+void writeCtrlTableInt16_Fast(uint8_t channel, uint8_t motorAddress, uint8_t ctrlTableAddress, int16_t value) {
+  sw_infos.addr = ctrlTableAddress; // Register for position goal
+  sw_infos.addr_length = 2; // Width of register (bytes)
+  info_xels_sw[0].p_data = (uint8_t*)&sw_data[0].int16; // Set packet to read position buffer
+  info_xels_sw[0].id = motorAddress;
+  sw_data[0].int16 = value;
+  sw_infos.is_info_changed = true;
+  switch (channel) {
+    case 1:
+      dxl1.syncWrite(&sw_infos);
+    break;
+    case 2:
+      dxl2.syncWrite(&sw_infos);
+    break;
+    case 3:
+      dxl3.syncWrite(&sw_infos);
+    break;
+  }
 }
 
 byte readByteFromSource(byte opSource) {
