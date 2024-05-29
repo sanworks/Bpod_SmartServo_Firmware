@@ -124,18 +124,20 @@ uint32_t dio_Debounce[3] = {100, 100, 100}; // Debounce interval (units = multip
 
 // General variables
 bool motorDetected[3][MAX_MOTOR_ADDR] = {false}; // Set to true if motor is detected
-uint8_t motorMode[3][MAX_MOTOR_ADDR] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
+uint8_t controlMode[3][MAX_MOTOR_ADDR] = {0}; // 1 = Position, 2 = Extended Position, 3 = Current-Limited Position, 4 = Velocity, 5 = Step
 float currentPosition[3][MAX_MOTOR_ADDR] = {0}; // Last known position
 bool trackMovement[3][MAX_MOTOR_ADDR] = {false}; // True if tracking a movement, to send a behavior event to the FSM when the movement ends
 uint8_t trackMovementSource[3][MAX_MOTOR_ADDR] = {0}; // Source serial interface of track movement (same as opSource, 0 = USB, 1 = State Machine)
 float trackMovementGoal[3][MAX_MOTOR_ADDR] = {0}; // Goal position of tracked movement
+bool motorStopFlag[3][MAX_MOTOR_ADDR] = {false}; // Flag to indicate when a motor has been stopped
+uint32_t motorStopTimeout[3][MAX_MOTOR_ADDR] = {0}; // Future time to restore motor torque after stop command
 uint8_t currentDioState[3] = {0}; // Current state of DIO lines
 uint8_t lastDioState[3] = {0}; // Last known DIO state
-uint32_t debounceCounter[3] = {0}; // count of hardware timer calls since debounce period started
-bool inDebounce[3] = {0}; // true if in debounce interval, false if not
+uint32_t debounceCounter[3] = {0}; // Count of hardware timer calls since debounce period started
+bool inDebounce[3] = {0}; // true if DIO channel is in the debounce interval, false if not
 uint8_t address = 1; // Motor address on a channel (1-253)
 uint8_t channel = 1; // Hardware serial channel targeted (1-3)
-uint8_t newMode = 1; // Motor mode
+uint8_t newMode = 1; // New control mode
 uint8_t newID = 0; // New motor address
 uint8_t programID = 0; // ID of the current program
 uint8_t moveType = 0; // Move type of the current program (0 = position/velocity/acceleration, 1 = position/motor current)
@@ -306,7 +308,7 @@ void loop() {
         pos = readFloatFromSource(opSource);
         maxVelocity = readFloatFromSource(opSource);
         maxAccel = readFloatFromSource(opSource);
-        if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2)) {
+        if ((controlMode[channel-1][address-1] == 1) || (controlMode[channel-1][address-1] == 2)) {
           writeMaxVelocity_Fast(channel, address, maxVelocity);
           writeMaxAcceleration_Fast(channel, address, maxAccel);
           setGoalPosition(channel, address, pos);
@@ -329,7 +331,7 @@ void loop() {
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
         current = readFloatFromSource(opSource);
-        if (motorMode[channel-1][address-1] == 3) {
+        if (controlMode[channel-1][address-1] == 3) {
           writeMaxCurrent_Fast(channel, address, current);
           setGoalPosition(channel, address, pos);
         } else {
@@ -339,11 +341,11 @@ void loop() {
         }
       break;
 
-      case 'V': // Set velocity goal (in motor mode 4). Units = rev/s. Sign indicates direction.
+      case 'V': // Set velocity goal (in control mode 4). Units = rev/s. Sign indicates direction.
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         newVelocity = readFloatFromSource(opSource);
-        if (motorMode[channel-1][address-1] == 4) {
+        if (controlMode[channel-1][address-1] == 4) {
           writeGoalVelocity_Fast(channel, address, newVelocity);
           if (opSource == 0) {
             USBCOM.writeByte(1);
@@ -355,7 +357,7 @@ void loop() {
         }
       break;
 
-      case 'S': // Step a given distance from the current shaft position (in motor mode 5) Units = degrees. Sign indicates direction.
+      case 'S': // Step a given distance from the current shaft position (in control mode 5) Units = degrees. Sign indicates direction.
         channel = readByteFromSource(opSource);
         address = readByteFromSource(opSource);
         pos = readFloatFromSource(opSource);
@@ -414,7 +416,7 @@ void loop() {
                                                     // 1 = Start Target Program
                                                     // 2 = Stop Target Program after current move
                                                     // 3 = Emergency Stop: Torque --> 0 for all motors, stop all programs.
-                                                    //     Torque can be re-enabled by setting the motor mode for each motor.
+                                                    //     Torque can be re-enabled by setting the control mode for each motor.
         if (opSource == 0) {
           USBCOM.readByteArray(dio_RisingEdgeFcn, 3);
           USBCOM.writeByte(1); // Acknowledge
@@ -435,8 +437,17 @@ void loop() {
         }
       break;
 
-      case '!': // Emergency stop
-        emergency_stop();
+      case 'X': // Stop a specific motor
+        channel = readByteFromSource(opSource);
+        address = readByteFromSource(opSource);
+        stopMotor(channel, address);
+        if (opSource == 0) {
+          USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '!': // Emergency stop all
+        emergencyStop();
         if (opSource == 0) {
           USBCOM.writeByte(1); // Acknowledge
         }
@@ -446,18 +457,8 @@ void loop() {
         if (opSource == 0) {
           channel = USBCOM.readByte();
           address = USBCOM.readByte();
-            switch(channel) {
-              case 1:
-                pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
-              break;
-              case 2:
-                pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
-              break;
-              case 3:
-                pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
-              break;
-            }
-            USBCOM.writeFloat(pos);
+          pos = getCurrentPosition(channel, address);
+          USBCOM.writeFloat(pos);
         }
       break;
 
@@ -480,24 +481,14 @@ void loop() {
         }
       break;
 
-      case 'M': // Set motor mode
+      case 'M': // Set control mode
         if (opSource == 0) {
           channel = USBCOM.readByte();
           address = USBCOM.readByte();
           newMode = USBCOM.readByte();
-          setMotorMode(channel, address, newMode);
+          setcontrolMode(channel, address, newMode);
           if (newMode == 5) {
-            switch(channel) {
-              case 1:
-                currentPosition[channel-1][address-1] = dxl1.getPresentPosition(address, UNIT_DEGREE);
-              break;
-              case 2:
-                currentPosition[channel-1][address-1] = dxl2.getPresentPosition(address, UNIT_DEGREE);
-              break;
-              case 3:
-                currentPosition[channel-1][address-1] = dxl3.getPresentPosition(address, UNIT_DEGREE);
-              break;
-            }
+            currentPosition[channel-1][address-1] = getCurrentPosition(channel, address);
           }
           USBCOM.writeByte(1);
         }
@@ -535,24 +526,14 @@ void loop() {
     for (int chan = 0; chan < 3; chan++) {
       for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
         if (trackMovement[chan][addr]) {
-          switch(chan+1) {
-            case 1:
-              pos = dxl1.getPresentPosition(addr+1, UNIT_DEGREE);
-            break;
-            case 2:
-              pos = dxl2.getPresentPosition(addr+1, UNIT_DEGREE);
-            break;
-            case 3:
-              pos = dxl3.getPresentPosition(addr+1, UNIT_DEGREE);
-            break;
-          }
+          pos = getCurrentPosition(chan+1, addr+1);
           thisMovementGoal = trackMovementGoal[chan][addr];
           if (abs(pos-thisMovementGoal) < 1) {
             if (trackMovementSource[chan][addr] == 1) {
               StateMachineCOM.writeByte(eventCode[chan][addr][1]);
             }
             trackMovement[chan][addr] = false;
-            if (motorMode[chan][addr] == 5) { // In step mode, clear position
+            if (controlMode[chan][addr] == 5) { // In step mode, clear position
               delayMicroseconds(100000); // Wait for movement to fully end (Todo: Replace with better indicator!)
               resetExtendedPosition(chan+1, addr+1);
               if (thisMovementGoal > 0) {
@@ -562,6 +543,30 @@ void loop() {
               }
               currentPosition[chan][addr] = thisMovementGoal;
             }
+          }
+        }
+      }
+    }
+  }
+  // Restore torque after motor stop
+  for (int chan = 0; chan < 3; chan++) {
+    for (int addr = 0; addr < MAX_MOTOR_ADDR; addr++) {
+      if (motorStopFlag[chan][addr]) {
+        if (millis() > motorStopTimeout[chan][addr]) {
+          switch(chan) {
+            case 0:
+              dxl1.torqueOn(addr+1);
+            break;
+            case 1:
+              dxl2.torqueOn(addr+1);
+            break;
+            case 2:
+              dxl3.torqueOn(addr+1);
+            break;
+          }
+          motorStopFlag[chan][addr] = false;
+          if (controlMode[chan][addr] == 5) { // In step mode, update current position
+            currentPosition[chan][addr] = getCurrentPosition(chan+1, addr+1);
           }
         }
       }
@@ -587,7 +592,7 @@ void programHandler() {
             program_running[dio_TargetProgram[i]] = false;
           break;
           case 3:
-            emergency_stop();
+            emergencyStop();
           break;
         }
         inDebounce[i] = true;
@@ -600,7 +605,7 @@ void programHandler() {
             stopProgram(dio_TargetProgram[i]);
           break;
           case 3:
-            emergency_stop();
+            emergencyStop();
           break;
         }
         inDebounce[i] = true;
@@ -652,7 +657,21 @@ void programHandler() {
   }
 }
 
-void setMotorMode(uint8_t channel, uint8_t address, uint8_t modeIndex) {
+float getCurrentPosition(uint8_t channel, uint8_t address) {
+  switch(channel) {
+    case 1:
+      return dxl1.getPresentPosition(address, UNIT_DEGREE);
+    break;
+    case 2:
+      return dxl2.getPresentPosition(address, UNIT_DEGREE);
+    break;
+    case 3:
+      return dxl3.getPresentPosition(address, UNIT_DEGREE);
+    break;
+  }
+}
+
+void setcontrolMode(uint8_t channel, uint8_t address, uint8_t modeIndex) {
   // Convert mode index to dynamixel mode index
   uint8_t dynamixelModeIndex = 0;
   switch(modeIndex) {
@@ -689,13 +708,13 @@ void setMotorMode(uint8_t channel, uint8_t address, uint8_t modeIndex) {
       dxl3.torqueOn(address);
     break;
   }
-  motorMode[channel-1][address-1] = modeIndex;
+  controlMode[channel-1][address-1] = modeIndex;
 }
 
 void setGoalPosition(uint8_t channel, uint8_t address, float newPosition) {
-  if ((motorMode[channel-1][address-1] == 1) || (motorMode[channel-1][address-1] == 2) 
-                                         || (motorMode[channel-1][address-1] == 3)
-                                         || (motorMode[channel-1][address-1] == 5)) {
+  if ((controlMode[channel-1][address-1] == 1) || (controlMode[channel-1][address-1] == 2) 
+                                         || (controlMode[channel-1][address-1] == 3)
+                                         || (controlMode[channel-1][address-1] == 5)) {
     writeGoalPosition_Fast(channel, address, newPosition);
     trackMovementSource[channel-1][address-1] = opSource;
     trackMovementGoal[channel-1][address-1] = newPosition;
@@ -763,25 +782,9 @@ void stepMotor(uint8_t channel, uint8_t address, float newPosition) {
 
 void delayUntilMovementEnd(uint8_t channel, uint8_t address, float targetPosition) {
   float pos = 0;
-  switch (channel) {
-    case 1:
-      pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
-      while (abs(pos-targetPosition) > 1) {
-        pos = dxl1.getPresentPosition(address, UNIT_DEGREE);
-      }
-    break;
-    case 2:
-      pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
-      while (abs(pos-targetPosition) > 1) {
-        pos = dxl2.getPresentPosition(address, UNIT_DEGREE);
-      }
-    break;
-    case 3:
-      pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
-      while (abs(pos-targetPosition) > 1) {
-        pos = dxl3.getPresentPosition(address, UNIT_DEGREE);
-      }
-    break;
+  pos = getCurrentPosition(channel, address);
+  while (abs(pos-targetPosition) > 1) {
+    pos = getCurrentPosition(channel, address);
   }
   delay(100); // A safe margin for the final degree
 }
@@ -818,7 +821,24 @@ void stopProgram(uint8_t programID) {
   program_running[programID] = false;
 }
 
-void emergency_stop() { // Stop all motors, leaving torque off. Motors must then be individually reinitialized by setting motor mode.
+void stopMotor(uint8_t channel, uint8_t address) {
+  switch(channel) {
+    case 1:
+      dxl1.torqueOff(address);
+    break;
+    case 2:
+      dxl2.torqueOff(address);
+    break;
+    case 3:
+      dxl3.torqueOff(address);
+    break;
+  }
+  trackMovement[channel-1][address-1] = false;
+  motorStopFlag[channel-1][address-1] = true;
+  motorStopTimeout[channel-1][address-1] = millis()+1;
+}
+
+void emergencyStop() { // Stop all motors, leaving torque off. Motors must then be individually reinitialized by setting control mode.
   for (int i = 0; i < 3; i++) {
     program_running[i] = false;
   }
