@@ -865,7 +865,7 @@ void discoverMotors(bool useUSB) {
   int i = 0;
   bool found = false;
   // Detect on channel 1
-  for (int motorIndex = 0; motorIndex < MAX_MOTOR_ADDR; motorIndex++) {
+  for (int motorIndex = 0; motorIndex < MAX_MOTOR_ADDR+1; motorIndex++) {
     found = false;
     i = 0;
     while ((found == false) && (i < 7)) {
