@@ -379,7 +379,6 @@ void loop() {
           nSteps = USBCOM.readByte();
           program_nSteps[programID] = nSteps;
           program_moveType[programID] = USBCOM.readByte();
-          program_nLoops[programID] = USBCOM.readUint32();
           for (int i = 0; i < nSteps; i++) {
             program_channel[programID][i] = USBCOM.readByte();
           }
@@ -395,6 +394,7 @@ void loop() {
           for (int i = 0; i < nSteps; i++) {
             program_stepTime[programID][i] = USBCOM.readUint32();
           }
+          program_nLoops[programID] = USBCOM.readUint32();
           program_loaded[programID] = true;
           USBCOM.writeByte(1); // Acknowledge
         }
