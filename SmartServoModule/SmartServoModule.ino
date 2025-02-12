@@ -250,10 +250,15 @@ void loop() {
         }
       break;
 
-      case '?': // Return module information
+      case '&': // Return firmware and hardware version via USB
         if (opSource == 0) {
           USBCOM.writeUint32(FIRMWARE_VERSION);
           USBCOM.writeUint32(HARDWARE_VERSION);
+        }
+      break;
+
+      case '?': // Return module information
+        if (opSource == 0) {
           USBCOM.writeUint32(MAX_PROGRAMS);
           USBCOM.writeUint32(MAX_STEPS);
         }
