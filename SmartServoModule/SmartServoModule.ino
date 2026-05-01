@@ -117,6 +117,7 @@ DYNAMIXEL::InfoSyncWriteInst_t sw_infos;
 DYNAMIXEL::XELInfoSyncWrite_t info_xels_sw[1];
 
 // DIO parameters
+uint8_t dio_Mode[3] = {0}; // 0 = Input (Pullup), 1 = Input (Pulldown), 2 = Reserved, 3 = Output for power (always high / 3.3V)
 uint8_t dio_FallingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
 uint8_t dio_RisingEdgeFcn[3] = {0}; // 0 = No Function, 1 = Start Target Program, 2 = Stop Target Program, 3 = Emergency Stop-All
 uint8_t dio_TargetProgram[3] = {0}; // Target motor program for each DIO channel 
@@ -187,9 +188,7 @@ void setup() {
   dxl3.setPortProtocolVersion(2.0);
 
   // Initialize DIO pins as input (high impedance)
-  for (int i = 0; i < 3; i++) {
-    pinMode(dioPins[i], INPUT_PULLUP);
-  }
+  configureDIOPins();
 
   // Read hardware revision from circuit board (an array of grounded pins indicates revision in binary, grounded = 1, floating = 0)
   circuitRevision = 0;
@@ -439,6 +438,14 @@ void loop() {
         if (opSource == 0) {
           USBCOM.readUint32Array(dio_Debounce, 3);
           USBCOM.writeByte(1); // Acknowledge
+        }
+      break;
+
+      case '|': // Set DIO pin mode 0 = Input (Pullup), 1 = Input (Pulldown), 2 = Reserved, 3 = Output for power (always high / 3.3V)
+        if (opSource == 0) {
+          USBCOM.readByteArray(dio_Mode, 3);
+          USBCOM.writeByte(1); // Acknowledge
+          configureDIOPins();
         }
       break;
 
@@ -1002,6 +1009,25 @@ float readFloatFromSource(byte opSource) {
     case 1:
       return StateMachineCOM.readFloat();
     break;
+  }
+}
+
+void configureDIOPins() {
+  for (int i = 0; i < 3; i++) {
+    switch (dio_Mode[i]) {
+      case 0:
+        digitalWrite(dioPins[i], LOW);
+        pinMode(dioPins[i], INPUT_PULLUP);
+      break;
+      case 1:
+        digitalWrite(dioPins[i], LOW);
+        pinMode(dioPins[i], INPUT_PULLDOWN);
+      break;
+      case 3:
+        pinMode(dioPins[i], OUTPUT);
+        digitalWrite(dioPins[i], HIGH);
+      break;
+    }
   }
 }
 
